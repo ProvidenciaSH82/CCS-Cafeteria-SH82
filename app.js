@@ -51,6 +51,21 @@ try {
 let appStarted = false; // evita sincronizar antes de haber comparado con Firebase al arrancar
 let fbPushTimer = null;
 let lastSyncSnapshot = { products: {}, sales: {}, pendingSales: {}, cashMovements: {}, cashClosures: {}, meta: null };
+let fbStatus = "init"; // "init" | "ok" | "error" — se muestra en pantalla para poder diagnosticar problemas de conexión sin abrir la consola
+
+// Actualiza el indicador visible (pantalla de Inicio y panel lateral) del
+// estado de la sincronización con Firebase. Se agregó porque, sin esto, un
+// problema de conexión (por ejemplo, reglas de la base de datos mal
+// configuradas) fallaba en silencio: el sistema seguía funcionando con los
+// datos locales de cada dispositivo, pero nadie se daba cuenta de que no se
+// estaban compartiendo con los demás.
+function setFbStatus(status){
+  fbStatus = status;
+  const label = status === "ok" ? "☁ Sincronizado"
+    : status === "error" ? "⚠ Sin conexión con la nube"
+    : "☁ Conectando...";
+  document.querySelectorAll(".fb-status-dot").forEach(el => { el.textContent = label; });
+}
 
 // ---------- ESTADO GLOBAL ----------
 let state = {
@@ -286,9 +301,14 @@ function pushStateToFirebase(){
     if (Object.keys(updates).length === 0) return;
     fbRootRef.update(updates).then(() => {
       lastSyncSnapshot = { products: p.currentMap, sales: s.currentMap, pendingSales: ps.currentMap, cashMovements: cm.currentMap, cashClosures: cc.currentMap, meta: metaObj };
-    }).catch(err => console.error("No se pudo sincronizar con Firebase:", err));
+      setFbStatus("ok");
+    }).catch(err => {
+      console.error("No se pudo sincronizar con Firebase (revisa las reglas de la base de datos en Firebase Console):", err);
+      setFbStatus("error");
+    });
   } catch (err){
     console.error("No se pudo sincronizar con Firebase:", err);
+    setFbStatus("error");
   }
 }
 
@@ -367,10 +387,17 @@ function attachFirebaseListener(){
   if (!fbReady) return;
   fbRootRef.on("value", (snap) => {
     if (!appStarted) return; // el arranque ya maneja la primera lectura con startApp()
+    setFbStatus("ok");
     const remote = snap.val();
     if (!remote) return;
     const changed = applyRemoteSnapshot(remote);
     if (changed) refreshVisibleView();
+  }, (err) => {
+    // Esto se dispara, por ejemplo, si las reglas de la base de datos no
+    // permiten leer/escribir: antes pasaba inadvertido porque no había
+    // una función de error registrada aquí.
+    console.error("Error del listener de Firebase (revisa las reglas de la base de datos en Firebase Console):", err);
+    setFbStatus("error");
   });
 }
 function debounce(fn, wait){
@@ -3580,17 +3607,20 @@ async function startApp(){
         updateNewSaleLock();
       }
       appStarted = true;
+      setFbStatus("ok");
       if (!remote){
         // Primera vez que se conecta esta base de Firebase: sube los datos locales.
         pushStateToFirebase();
       }
       attachFirebaseListener();
     } catch (err){
-      console.error("No se pudo conectar con Firebase; el sistema sigue funcionando solo en este dispositivo:", err);
+      console.error("No se pudo conectar con Firebase; el sistema sigue funcionando solo en este dispositivo (revisa las reglas de la base de datos en Firebase Console):", err);
       appStarted = true;
+      setFbStatus("error");
     }
   } else {
     appStarted = true;
+    setFbStatus("error");
   }
 }
 startApp();
