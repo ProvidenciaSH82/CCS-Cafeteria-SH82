@@ -366,6 +366,7 @@ function pushStateToFirebase(){
 function refreshVisibleView(){
   applyTheme();
   renderSidebarNav();
+  updateNewSaleLock();
   if (currentArea === "landing"){
     document.getElementById("landingBrandName").textContent = state.businessName;
     return;
@@ -3657,7 +3658,14 @@ async function startApp(){
 
   if (fbReady){
     try {
-      const snap = await fbRootRef.once("value");
+      // Límite de tiempo para la primera lectura: si se demora (por ejemplo,
+      // en datos móviles), no se deja trabada la pantalla de arranque — se
+      // sigue con lo que haya localmente y el listener en tiempo real (más
+      // abajo) se encarga de traer lo que falte apenas pueda conectar.
+      const snap = await Promise.race([
+        fbRootRef.once("value"),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Tiempo de espera agotado conectando con Firebase")), 8000))
+      ]);
       const remote = snap.val();
       if (remote){
         applyRemoteSnapshot(remote);
@@ -3665,18 +3673,24 @@ async function startApp(){
         goToLanding();
         updateNewSaleLock();
       }
-      appStarted = true;
       setFbStatus("ok");
       if (!remote){
         // Primera vez que se conecta esta base de Firebase: sube los datos locales.
         pushStateToFirebase();
       }
-      attachFirebaseListener();
     } catch (err){
-      console.error("No se pudo conectar con Firebase; el sistema sigue funcionando solo en este dispositivo (revisa las reglas de la base de datos en Firebase Console):", err);
-      appStarted = true;
+      console.error("No se pudo completar la primera lectura de Firebase a tiempo; se sigue intentando en segundo plano (revisa las reglas de la base de datos en Firebase Console si esto persiste):", err);
       setFbStatus("error");
     }
+    // IMPORTANTE: el listener en tiempo real se engancha siempre que haya
+    // Firebase disponible, haya fallado o no la primera lectura de arriba.
+    // Antes solo se enganchaba si esa primera lectura tenía éxito, y un
+    // dispositivo que arrancaba con una conexión lenta o inestable se
+    // quedaba sin recibir los cambios de los demás por el resto de la
+    // sesión (por ejemplo, no se enteraba de un cierre/apertura de caja
+    // hecho desde otro dispositivo) hasta recargar la página entera.
+    appStarted = true;
+    attachFirebaseListener();
   } else {
     appStarted = true;
     setFbStatus("error");
