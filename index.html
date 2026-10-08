@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>POS Shalom</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
+</head>
+<body>
+
+  <!-- ===== PANTALLA PRINCIPAL (Cajero / Entrega de pedidos) ===== -->
+  <div class="landing" id="landingScreen">
+    <div class="landing-box">
+      <div class="landing-mark">S</div>
+      <h1 class="landing-name" id="landingBrandName">POS Shalom</h1>
+      <p class="landing-sub">Elige el área en la que quieres trabajar</p>
+      <div class="landing-buttons">
+        <button class="landing-btn" id="btnEnterCajero">
+          <span class="landing-btn-icon">🧾</span>
+          <span>Cajero</span>
+        </button>
+        <button class="landing-btn" id="btnEnterEntrega">
+          <span class="landing-btn-icon">🛎️</span>
+          <span>Entrega de pedidos</span>
+        </button>
+        <button class="landing-btn" id="btnEnterConfigGeneral">
+          <span class="landing-btn-icon">⚙</span>
+          <span>Configuración</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== APP (Cajero / Entrega) ===== -->
+  <button class="mobile-menu-btn hidden" id="mobileMenuBtn">☰</button>
+
+  <div class="app hidden" id="appShell">
+
+    <!-- ===== PANEL LATERAL (contenido dinámico según el área) ===== -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <button class="sidebar-toggle" id="sidebarToggle" title="Contraer/expandir menú">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="brand">
+          <div class="brand-mark">S</div>
+          <div class="brand-name" id="brandName">POS Shalom</div>
+        </div>
+      </div>
+
+      <nav class="nav" id="sidebarNav"></nav>
+    </aside>
+
+    <!-- ===== CONTENIDO PRINCIPAL ===== -->
+    <main class="main">
+
+      <!-- ========================================================= -->
+      <!-- ÁREA CAJERO                                                -->
+      <!-- ========================================================= -->
+
+      <!-- ---------- RESUMEN DEL DÍA ---------- -->
+      <section class="view" id="view-resumen">
+        <header class="view-header">
+          <h1>Resumen del día</h1>
+        </header>
+        <p class="muted" id="todayDate" style="margin-bottom:14px;"></p>
+        <div class="stat-grid">
+          <div class="stat-card accent">
+            <span class="stat-label">Total vendido hoy</span>
+            <span class="stat-value" id="statTotal">Bs 0.00</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Efectivo</span>
+            <span class="stat-value" id="statCash">Bs 0.00</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">QR</span>
+            <span class="stat-value" id="statQr">Bs 0.00</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Ventas realizadas</span>
+            <span class="stat-value" id="statCount">0</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Productos vendidos</span>
+            <span class="stat-value" id="statProductsSold">0</span>
+          </div>
+        </div>
+
+        <h2 style="font-size:1.05rem; margin:20px 0 10px;">Valores más/menos entradas/salidas</h2>
+        <div class="stat-grid">
+          <div class="stat-card">
+            <span class="stat-label">Efectivo más/menos entradas/salidas</span>
+            <span class="stat-value" id="statCashAdjusted">Bs 0.00</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">QR más/menos entradas/salidas</span>
+            <span class="stat-value" id="statQrAdjusted">Bs 0.00</span>
+          </div>
+        </div>
+
+        <button class="btn-primary" id="btnMovement" style="margin:16px 0;">Entrada / Salida</button>
+        <h2 style="font-size:1.05rem; margin-bottom:10px;">Movimientos de la jornada</h2>
+        <div class="history-list" id="movementsList"></div>
+      </section>
+
+      <!-- ---------- NUEVA VENTA ---------- -->
+      <section class="view" id="view-newsale">
+        <div class="sale-layout">
+          <div class="sale-picker">
+            <header class="view-header row">
+              <button class="btn-back hidden" id="btnBackToCats">← Volver a categorías</button>
+              <h1 id="pickerTitle">Categorías</h1>
+            </header>
+            <div class="card-grid" id="categoryGrid"></div>
+            <div class="card-grid hidden" id="productGrid"></div>
+            <div class="pagination hidden" id="pickerPagination"></div>
+          </div>
+
+          <div class="cart-panel">
+            <div class="cart-header">
+              <h2>Venta actual</h2>
+              <div class="cart-header-actions">
+                <button class="btn-ghost" id="btnHoldSale">Mandar a la cola</button>
+                <button class="btn-ghost danger" id="btnClearCart">Vaciar carrito</button>
+              </div>
+            </div>
+            <div class="cart-items" id="cartItems">
+              <p class="empty-msg">Aún no hay productos en la venta.</p>
+            </div>
+            <div class="cart-summary">
+              <div class="sum-row"><span>Subtotal</span><span id="cartSubtotal">Bs 0.00</span></div>
+              <div class="sum-row"><span>Descuento</span><span id="cartDiscount">Bs 0.00</span></div>
+              <div class="sum-row total"><span>Total</span><span id="cartTotal">Bs 0.00</span></div>
+            </div>
+            <div class="pay-methods">
+              <button class="pay-btn" data-method="efectivo">Efectivo</button>
+              <button class="pay-btn" data-method="qr">QR</button>
+              <button class="pay-btn" data-method="mixto">Mixto</button>
+            </div>
+            <button class="btn-ghost" id="btnPendingSales" style="margin-top:10px; width:100%;">Ventas en espera</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- PRODUCTOS ---------- -->
+      <section class="view" id="view-products">
+        <header class="view-header row">
+          <h1 id="prodTitle">Productos y categorías</h1>
+          <div class="header-actions">
+            <button class="btn-primary" id="btnImportExport">Importar / Exportar</button>
+            <button class="btn-primary" id="btnAddCategory">Categoría</button>
+            <button class="btn-primary hidden" id="btnGoStock">Stock</button>
+            <button class="btn-primary" id="btnAddProduct">+ Producto</button>
+          </div>
+        </header>
+        <button class="btn-back hidden" id="btnBackToProdCats" style="margin-bottom:14px;">← Volver a categorías</button>
+        <div id="prodCategoryGrid" class="card-grid"></div>
+        <div id="productAdminList" class="hidden"></div>
+      </section>
+
+      <!-- ---------- ADMINISTRACIÓN DE CATEGORÍAS (pantalla propia) ---------- -->
+      <section class="view" id="view-categories">
+        <header class="view-header row">
+          <button class="btn-back" id="btnBackToProducts">← Volver a productos</button>
+          <h1>Categorías</h1>
+        </header>
+        <button class="btn-primary" id="btnAddCategoryScreen" style="margin-bottom:16px;">+ Agregar categoría</button>
+        <div id="categoryAdminList"></div>
+      </section>
+
+      <!-- ---------- STOCK (solo visible si el sistema de stock está activado) ---------- -->
+      <section class="view" id="view-stock">
+        <header class="view-header row">
+          <button class="btn-back" id="btnBackToProductsFromStock">← Volver a productos</button>
+          <h1>Stock</h1>
+        </header>
+        <div class="header-actions" style="margin-bottom:16px;">
+          <button class="btn-primary" id="btnGoStockLow">Ver stock bajo</button>
+          <button class="btn-ghost danger" id="btnClearAllStock" style="margin-left:auto;">Vaciar todo el stock</button>
+        </div>
+        <div id="stockList"></div>
+      </section>
+
+      <!-- ---------- STOCK BAJO ---------- -->
+      <section class="view" id="view-stocklow">
+        <header class="view-header row">
+          <button class="btn-back" id="btnBackToStockFromLow">← Volver a stock</button>
+          <h1>Stock bajo</h1>
+        </header>
+        <div id="stockLowList"></div>
+      </section>
+
+      <!-- ---------- HISTORIAL DE VENTAS ---------- -->
+      <section class="view" id="view-history">
+        <header class="view-header">
+          <h1>Historial de ventas</h1>
+        </header>
+        <div class="history-list" id="historyList"></div>
+      </section>
+
+      <!-- ---------- APERTURA Y CIERRE DE CAJA ---------- -->
+      <section class="view" id="view-cashregister">
+        <header class="view-header">
+          <h1>Apertura y cierre de caja</h1>
+        </header>
+        <div class="caja-panel" id="cajaPanel"></div>
+        <h2 style="font-size:1.05rem; margin:22px 0 12px;">Cierres anteriores</h2>
+        <div class="history-list" id="closuresList"></div>
+      </section>
+
+      <!-- ---------- CONFIGURACIÓN (específica del Cajero) ---------- -->
+      <section class="view" id="view-settings">
+        <header class="view-header">
+          <h1>Configuración</h1>
+          <p class="muted">Ajustes propios del sector Cajero. Para el nombre, logo y colores del negocio, usa "Configuración" desde la pantalla principal.</p>
+        </header>
+
+        <div class="settings-block" style="max-width:520px;">
+          <label>Sistema de stock</label>
+          <div class="toggle-pair">
+            <button id="stockOn">Activado</button>
+            <button id="stockOff">Desactivado</button>
+          </div>
+        </div>
+
+        <div class="settings-block" style="margin-top:28px; max-width:520px;">
+          <label>Tamaño de cuadrícula (categorías y productos)</label>
+          <div class="size-grid" id="gridSizeList"></div>
+          <button class="btn-primary" id="btnAddGridSize" style="margin-top:12px; width:fit-content;">+ Agregar tamaño</button>
+        </div>
+
+        <div class="settings-block" style="margin-top:28px; max-width:520px;">
+          <label>Opciones avanzadas</label>
+          <button class="btn-ghost" id="btnAdvancedConfig" style="width:fit-content;">Configuración avanzada</button>
+        </div>
+      </section>
+
+      <!-- ---------- CONFIGURACIÓN GENERAL (pantalla principal) ---------- -->
+      <section class="view" id="view-config-general">
+        <header class="view-header">
+          <h1>Configuración general</h1>
+        </header>
+
+        <div class="settings-block" style="max-width:420px;">
+          <label>Nombre del negocio</label>
+          <input type="text" id="cfgBusinessName">
+          <button class="btn-primary" id="btnSaveBusinessName" style="width:fit-content;">Guardar nombre</button>
+        </div>
+
+        <div class="settings-block" style="margin-top:26px; max-width:420px;">
+          <label>Logo del negocio</label>
+          <input type="file" id="logoInput" accept="image/*">
+          <p class="muted" style="font-size:.8rem; margin-top:4px;">Se usa en el panel lateral y en la pantalla principal. Máximo 1.5 MB.</p>
+          <label style="margin-top:14px;">Tamaño del logo</label>
+          <input type="number" id="cfgLogoScale" min="0.1" step="0.1" placeholder="1.0" style="max-width:120px;">
+          <p class="muted" style="font-size:.8rem; margin-top:4px;">1.0 = tamaño actual, 1.2 = 20% más grande, 2.0 = el doble. Un solo decimal.</p>
+          <button class="btn-primary" id="btnSaveLogoScale" style="width:fit-content; margin-top:8px;">Aplicar tamaño</button>
+        </div>
+
+        <div class="settings-block" style="margin-top:26px; max-width:420px;">
+          <label>Color de fondo</label>
+          <input type="color" id="cfgBgColor">
+          <label style="margin-top:14px;">Color del panel lateral</label>
+          <input type="color" id="cfgSidebarColor">
+          <label style="margin-top:14px;">Color de botones de selección</label>
+          <input type="color" id="cfgAccentColor">
+          <label style="margin-top:14px;">Color de textos</label>
+          <input type="color" id="cfgTextColor">
+          <div style="display:flex; gap:10px; margin-top:16px; flex-wrap:wrap;">
+            <button class="btn-primary" id="btnSaveTheme" style="width:fit-content;">Guardar colores</button>
+            <button class="btn-ghost" id="btnResetTheme" style="width:fit-content;">Restablecer por defecto</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================================= -->
+      <!-- ÁREA ENTREGA DE PEDIDOS                                    -->
+      <!-- ========================================================= -->
+
+      <!-- ---------- PEDIDOS ---------- -->
+      <section class="view" id="view-pedidos">
+        <header class="view-header">
+          <h1>Pedidos</h1>
+        </header>
+        <div class="history-list" id="pedidosList"></div>
+      </section>
+
+      <!-- ---------- PRODUCTOS PENDIENTES ---------- -->
+      <section class="view" id="view-productospendientes">
+        <header class="view-header">
+          <h1>Productos pendientes</h1>
+        </header>
+        <div id="productosPendientesList"></div>
+      </section>
+
+      <!-- ---------- COCINA ---------- -->
+      <section class="view" id="view-cocina">
+        <header class="view-header">
+          <h1>Cocina</h1>
+          <p class="muted">Solo productos marcados como "Mandar a cocina" que estén pendientes.</p>
+        </header>
+        <div id="cocinaList"></div>
+      </section>
+
+      <!-- ---------- PEDIDOS FINALIZADOS ---------- -->
+      <section class="view" id="view-pedidosfinalizados">
+        <header class="view-header">
+          <h1>Pedidos finalizados</h1>
+        </header>
+        <div class="history-list" id="pedidosFinalizadosList"></div>
+      </section>
+
+      <!-- ---------- OCULTAR / VISUALIZAR (disponibilidad de productos) ---------- -->
+      <section class="view" id="view-visibility">
+        <header class="view-header row">
+          <button class="btn-back hidden" id="btnBackToVisCats">← Volver a categorías</button>
+          <h1 id="visTitle">Ocultar / Visualizar</h1>
+        </header>
+        <p class="muted" style="margin-bottom:14px;">Toca un producto para marcarlo como agotado o volver a mostrarlo. Este estado es el mismo que usa Cajero.</p>
+        <div id="visCategoryGrid" class="card-grid"></div>
+        <div id="visProductList" class="hidden"></div>
+      </section>
+
+      <!-- ---------- DETALLE DE ENTREGA (pantalla propia) ---------- -->
+      <section class="view" id="view-deliverydetail">
+        <header class="view-header row">
+          <button class="btn-back" id="btnBackFromDeliveryDetail">← Volver</button>
+          <h1 id="deliveryDetailTitle">Pedido</h1>
+        </header>
+        <p class="muted" id="deliveryDetailMeta" style="margin-bottom:16px;"></p>
+        <h2 style="font-size:.95rem; margin-bottom:8px;">Pendientes</h2>
+        <div class="unit-grid" id="deliveryPendingGrid"></div>
+        <h2 style="font-size:.95rem; margin:20px 0 8px;">Entregados</h2>
+        <div class="unit-grid" id="deliveryDoneGrid"></div>
+        <button class="btn-primary" id="btnFinalizeDeliveryDetail" style="margin-top:22px;">Finalizar pedido</button>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ===== MODAL genérico (descuento, agregar producto/categoría, ver venta) ===== -->
+  <div class="modal-overlay hidden" id="modalOverlay">
+    <div class="modal" id="modalBox"></div>
+  </div>
+
+  <div class="toast" id="posToast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
