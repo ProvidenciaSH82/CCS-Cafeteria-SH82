@@ -264,6 +264,53 @@ function buildMetaObject(){
 // a Firebase y arma solo las rutas que cambiaron, para usar con `update()`
 // (que fusiona por ruta, sin pisar lo que otro dispositivo haya escrito en
 // una ruta distinta al mismo tiempo).
+// Identificador de la jornada actual para la ruta del contador en Firebase
+// (una jornada = una apertura de caja; cada apertura tiene su propio
+// contador, así que el número de venta vuelve a empezar en 1 sin chocar con
+// el de jornadas anteriores).
+function getJornadaCounterKey(){
+  if (!state.cashRegister || !state.cashRegister.openedAt) return null;
+  return state.cashRegister.openedAt.replace(/[.#$\[\]\/]/g, "_");
+}
+
+// Calcula el próximo número de venta de forma segura entre varios
+// dispositivos. Usa una transacción de Firebase (increment atómico en el
+// servidor): si dos cajeros cobran en el mismo instante, Firebase procesa
+// las dos transacciones una después de la otra y a cada una le entrega un
+// número distinto — nunca el mismo. Si no hay Firebase disponible, o no
+// responde en unos segundos (sin internet), se usa el cálculo local de
+// siempre, para no trabar una venta.
+function nextJornadaNumberSafe(){
+  const localFallback = () => getCurrentJornadaSales().length + 1;
+  const key = getJornadaCounterKey();
+  if (!fbReady || !fbRootRef || !key) return Promise.resolve(localFallback());
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(localFallback());
+    }, 3000);
+    fbRootRef.child("counters/" + key).transaction((current) => (current || 0) + 1)
+      .then((result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (result.committed && result.snapshot.val()){
+          resolve(result.snapshot.val());
+        } else {
+          resolve(localFallback());
+        }
+      })
+      .catch(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(localFallback());
+      });
+  });
+}
+
 function diffCollectionUpdates(basePath, currentArr, lastMap){
   const updates = {};
   const currentMap = arrayToMapById(currentArr);
@@ -1924,7 +1971,17 @@ function openNameModal(method, cash, qr){
   setTimeout(() => { document.getElementById("orderNameInput").focus(); }, 50);
 }
 
-function finalizeSale(name, method, cash, qr){
+let finalizingSale = false; // evita que un doble clic durante la breve espera de red cree dos ventas
+async function finalizeSale(name, method, cash, qr){
+  if (finalizingSale) return;
+  finalizingSale = true;
+  try {
+    await finalizeSaleInner(name, method, cash, qr);
+  } finally {
+    finalizingSale = false;
+  }
+}
+async function finalizeSaleInner(name, method, cash, qr){
   const total = getCartTotal();
   const subtotal = state.cart.reduce((a,i) => a + i.price*i.qty, 0);
   const discount = subtotal - total;
@@ -1998,8 +2055,10 @@ function finalizeSale(name, method, cash, qr){
     // El id interno nunca se reinicia (identifica la venta de forma única para
     // siempre). El número de jornada sí se reinicia con cada apertura de caja,
     // y es el número que se le muestra al usuario ("Venta 1", "Venta 2"...).
+    // Se calcula de forma segura entre dispositivos (ver nextJornadaNumberSafe)
+    // para que dos cajeros cobrando al mismo tiempo nunca obtengan el mismo número.
     const nextId = uid("sale");
-    const jornadaNumber = getCurrentJornadaSales().length + 1;
+    const jornadaNumber = await nextJornadaNumberSafe();
     const sale = {
       id: nextId,
       jornadaNumber,
