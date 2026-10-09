@@ -260,6 +260,40 @@ function buildMetaObject(){
   };
 }
 
+// ---------- BUG REAL: Firebase Realtime Database BORRA cualquier campo que
+// se escriba como null (no lo guarda como "null", directamente deja de
+// existir esa clave). El único campo de "meta" que legítimamente vale null
+// es cashRegister cuando la caja está cerrada. Resultado: al cerrar caja,
+// Firebase borraba la clave "cashRegister" en vez de guardar que estaba
+// cerrada, y los demás dispositivos no podían distinguir "nunca llegó este
+// dato" de "se cerró la caja" — por eso se quedaban trabados con el último
+// valor que tenían (abierta) y nunca aceptaban ni la apertura ni el cierre
+// de otro dispositivo. La solución: antes de subir "meta" a Firebase, se
+// reemplaza cualquier valor null por un marcador de texto que Firebase sí
+// guarda tal cual; al leerlo de vuelta, se vuelve a convertir en null.
+const FB_NULL_MARKER = "__POS_SHALOM_NULL__";
+function encodeMetaForFirebase(metaObj){
+  const out = Object.assign({}, metaObj);
+  Object.keys(out).forEach(key => {
+    if (out[key] === null) out[key] = FB_NULL_MARKER;
+  });
+  return out;
+}
+function decodeMetaFromFirebase(remoteMeta){
+  if (!remoteMeta) return remoteMeta;
+  const out = Object.assign({}, remoteMeta);
+  Object.keys(out).forEach(key => {
+    if (out[key] === FB_NULL_MARKER) out[key] = null;
+  });
+  // Compatibilidad con datos ya guardados antes de este arreglo: si la clave
+  // cashRegister directamente no existe (quedó borrada por el bug de arriba),
+  // se trata como caja cerrada en vez de como "dato desconocido".
+  if (!Object.prototype.hasOwnProperty.call(out, "cashRegister")){
+    out.cashRegister = null;
+  }
+  return out;
+}
+
 // Compara el arreglo actual de una colección contra la última foto enviada
 // a Firebase y arma solo las rutas que cambiaron, para usar con `update()`
 // (que fusiona por ruta, sin pisar lo que otro dispositivo haya escrito en
@@ -344,7 +378,7 @@ function pushStateToFirebase(){
     const metaObj = buildMetaObject();
     const metaChanged = JSON.stringify(metaObj) !== JSON.stringify(lastSyncSnapshot.meta);
     const updates = Object.assign({}, p.updates, s.updates, ps.updates, cm.updates, cc.updates);
-    if (metaChanged) updates["meta"] = metaObj;
+    if (metaChanged) updates["meta"] = encodeMetaForFirebase(metaObj);
     if (Object.keys(updates).length === 0) return;
     fbRootRef.update(updates).then(() => {
       lastSyncSnapshot = { products: p.currentMap, sales: s.currentMap, pendingSales: ps.currentMap, cashMovements: cm.currentMap, cashClosures: cc.currentMap, meta: metaObj };
@@ -465,7 +499,11 @@ function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
     const curVal = current[key];
     const lastVal = lastSyncedMeta[key];
     const remVal = remoteMeta ? remoteMeta[key] : undefined;
-    const pending = JSON.stringify(curVal) !== JSON.stringify(lastVal);
+    // undefined (clave nunca guardada) y null (valor explícito) se tratan
+    // igual aquí: así una clave que todavía no se confirmó por Firebase no
+    // se considera "pendiente" solo por esa diferencia de tipo.
+    const norm = (v) => (v === undefined ? null : v);
+    const pending = JSON.stringify(norm(curVal)) !== JSON.stringify(norm(lastVal));
     if (pending){
       merged[key] = curVal; // cambio propio (p.ej. un cierre de caja) sin subir todavía: se respeta
     } else if (remVal !== undefined){
@@ -483,7 +521,8 @@ function applyRemoteSnapshot(remote){
   let changed = false;
 
   if (remote.meta){
-    const { mergedMeta, confirmedMeta } = mergeMetaWithRemote(remote.meta, lastSyncSnapshot.meta);
+    const decodedRemoteMeta = decodeMetaFromFirebase(remote.meta);
+    const { mergedMeta, confirmedMeta } = mergeMetaWithRemote(decodedRemoteMeta, lastSyncSnapshot.meta);
     if (JSON.stringify(mergedMeta) !== JSON.stringify(buildMetaObject())){
       state.businessName = mergedMeta.businessName;
       state.categories = mergedMeta.categories || state.categories;
