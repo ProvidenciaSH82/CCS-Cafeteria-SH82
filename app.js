@@ -51,6 +51,31 @@ try {
 let appStarted = false; // evita sincronizar antes de haber comparado con Firebase al arrancar
 let fbPushTimer = null;
 let lastSyncSnapshot = { products: {}, sales: {}, pendingSales: {}, cashMovements: {}, cashClosures: {}, meta: null };
+
+// Guarda en este dispositivo cuál fue la última versión de cada dato que se
+// confirmó subida a Firebase. Sin esto, cada vez que se abre la página se
+// "olvida" qué era realmente un cambio propio sin subir y qué simplemente
+// era un dato viejo — y un dispositivo que estuvo mucho tiempo sin abrirse
+// terminaría tratando TODOS sus datos desactualizados como "cambios
+// propios pendientes", sobrescribiendo en Firebase lo nuevo que otros
+// dispositivos generaron mientras tanto.
+const LAST_SYNC_STORAGE_KEY = "posShalomLastSyncSnapshot";
+function persistLastSyncSnapshot(){
+  try {
+    localStorage.setItem(LAST_SYNC_STORAGE_KEY, JSON.stringify(lastSyncSnapshot));
+  } catch (err){
+    console.error("No se pudo guardar el estado de sincronización localmente:", err);
+  }
+}
+function loadPersistedLastSyncSnapshot(){
+  try {
+    const raw = localStorage.getItem(LAST_SYNC_STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (err){
+    return null;
+  }
+}
 let fbStatus = "init"; // "init" | "ok" | "error" — se muestra en pantalla para poder diagnosticar problemas de conexión sin abrir la consola
 
 // Actualiza el indicador visible (pantalla de Inicio y panel lateral) del
@@ -382,6 +407,7 @@ function pushStateToFirebase(){
     if (Object.keys(updates).length === 0) return;
     fbRootRef.update(updates).then(() => {
       lastSyncSnapshot = { products: p.currentMap, sales: s.currentMap, pendingSales: ps.currentMap, cashMovements: cm.currentMap, cashClosures: cc.currentMap, meta: metaObj };
+      persistLastSyncSnapshot();
       setFbStatus("ok");
     }).catch(err => {
       console.error("No se pudo sincronizar con Firebase (revisa las reglas de la base de datos en Firebase Console):", err);
@@ -555,6 +581,7 @@ function applyRemoteSnapshot(remote){
     lastSyncSnapshot[stateKey] = confirmedMap;
   });
 
+  persistLastSyncSnapshot();
   if (changed){
     applyDefaultsAndMigrations();
     localStorage.setItem("posShalomState", JSON.stringify(state));
@@ -3799,22 +3826,27 @@ async function startApp(){
       ]);
       const remote = snap.val();
       if (remote){
-        // Antes de fusionar, la "última foto confirmada" se inicializa con lo
-        // que trae Firebase (no con un objeto vacío): así, cualquier registro
-        // local que coincida con uno remoto se trata como ya sincronizado, y
-        // solo lo que sea distinto o exista nada más que localmente (por
-        // ejemplo, algo creado sin conexión que nunca llegó a subirse) se
-        // trata como pendiente de subir. Si se dejara vacío, cada registro
-        // local parecería "pendiente" y ganaría siempre sobre lo remoto, aun
-        // cuando lo remoto fuera más nuevo.
-        lastSyncSnapshot = {
-          products: remote.products || {},
-          sales: remote.sales || {},
-          pendingSales: remote.pendingSales || {},
-          cashMovements: remote.cashMovements || {},
-          cashClosures: remote.cashClosures || {},
-          meta: remote.meta || null
-        };
+        const persisted = loadPersistedLastSyncSnapshot();
+        if (persisted){
+          // Este dispositivo ya sincronizó antes: se usa lo último que
+          // confirmó haber subido como punto de comparación, para no
+          // confundir "dato simplemente viejo" con "cambio propio
+          // pendiente" (ver nota arriba de loadPersistedLastSyncSnapshot).
+          lastSyncSnapshot = persisted;
+        } else {
+          // Primera vez que este dispositivo sincroniza: no hay nada propio
+          // que proteger todavía, así que se adopta Firebase directo (se
+          // decodifica "meta" porque Firebase nunca guarda valores null tal
+          // cual, ver encodeMetaForFirebase/decodeMetaFromFirebase).
+          lastSyncSnapshot = {
+            products: remote.products || {},
+            sales: remote.sales || {},
+            pendingSales: remote.pendingSales || {},
+            cashMovements: remote.cashMovements || {},
+            cashClosures: remote.cashClosures || {},
+            meta: decodeMetaFromFirebase(remote.meta) || null
+          };
+        }
         applyRemoteSnapshot(remote);
         applyTheme();
         goToLanding();
