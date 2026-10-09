@@ -387,47 +387,139 @@ function refreshVisibleView(){
 
 // Aplica al estado local los datos que llegaron de Firebase (de este mismo
 // dispositivo o de otro). El carrito (state.cart) es local y nunca se toca.
+// ---------- FUSIÓN SEGURA CON LO QUE LLEGA DE OTRO DISPOSITIVO ----------
+// Bug real que esto corrige: antes, cuando llegaba una actualización de
+// Firebase, se reemplazaba el arreglo local completo (state.sales = lo que
+// vino de remoto). Si este mismo dispositivo acababa de crear una venta
+// propia que TODAVÍA no había terminado de subirse (el envío real tiene un
+// pequeño retraso, "debounce", de medio segundo), esa venta propia quedaba
+// pisada por la foto de Firebase que llegaba un instante antes de que la
+// propia terminara de subirse — y como además esa foto se guardaba como
+// "ya sincronizado", la venta nunca se volvía a intentar subir: desaparecía
+// para siempre. Esto es exactamente lo que pasaba al vender casi al mismo
+// tiempo desde dos dispositivos.
+//
+// La solución: por cada registro (venta, producto, etc.), se compara el
+// valor local contra el último valor que SABEMOS que ya se subió
+// (lastSyncSnapshot). Si son iguales, no hay nada propio pendiente y se
+// puede confiar en lo que diga remoto. Si son distintos, hay un cambio
+// propio sin subir todavía (una venta nueva, una edición, incluso un
+// borrado) y se respeta tal cual está acá — el propio envío pendiente de
+// este dispositivo se va a encargar de subirlo enseguida. "lastSyncSnapshot"
+// solo se actualiza para los registros que sabemos confirmados por
+// Firebase, nunca para los que se dejaron tal cual por tener un cambio
+// local pendiente, así el próximo envío los sigue detectando y subiendo.
+function mergeCollectionWithRemote(localArr, remoteObj, lastSyncedMap){
+  const remoteMap = remoteObj || {};
+  const localMap = arrayToMapById(localArr);
+  lastSyncedMap = lastSyncedMap || {};
+  const ids = new Set([
+    ...Object.keys(remoteMap),
+    ...Object.keys(localMap),
+    ...Object.keys(lastSyncedMap)
+  ]);
+  const merged = {};
+  const confirmedSynced = Object.assign({}, lastSyncedMap);
+  ids.forEach(id => {
+    const hasLocal = Object.prototype.hasOwnProperty.call(localMap, id);
+    const localVal = hasLocal ? localMap[id] : undefined;
+    const hasLastSynced = Object.prototype.hasOwnProperty.call(lastSyncedMap, id);
+    const lastVal = hasLastSynced ? lastSyncedMap[id] : undefined;
+    const remoteVal = (remoteMap[id] !== undefined && remoteMap[id] !== null) ? remoteMap[id] : undefined;
+    const hasRemote = remoteVal !== undefined;
+
+    const localPending = JSON.stringify(hasLocal ? localVal : null) !== JSON.stringify(hasLastSynced ? lastVal : null);
+
+    if (localPending){
+      if (hasLocal) merged[id] = localVal;
+      // no se toca confirmedSynced[id]: el próximo push lo va a detectar y subir.
+    } else if (hasRemote){
+      merged[id] = remoteVal;
+      confirmedSynced[id] = remoteVal;
+    } else if (hasLocal){
+      merged[id] = localVal;
+    } else if (hasLastSynced){
+      delete confirmedSynced[id]; // remoto ya no lo tiene y no hay nada pendiente local: se eliminó en otro lado
+    }
+  });
+  return { mergedArr: Object.values(merged), confirmedMap: confirmedSynced };
+}
+
+// Misma idea que mergeCollectionWithRemote pero campo por campo, para el
+// bloque "meta" (que no es una colección con IDs sino un solo objeto:
+// nombre del negocio, categorías, caja abierta/cerrada, tema, etc.). Esto
+// es lo que corrige que un cierre de caja hecho en un dispositivo pudiera
+// ser "revivido" por una foto de otro dispositivo que todavía no se había
+// enterado del cierre.
+function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
+  const current = buildMetaObject();
+  lastSyncedMeta = lastSyncedMeta || {};
+  const merged = {};
+  const confirmedSynced = Object.assign({}, lastSyncedMeta);
+  const keys = new Set([
+    ...Object.keys(current),
+    ...Object.keys(remoteMeta || {}),
+    ...Object.keys(lastSyncedMeta)
+  ]);
+  keys.forEach(key => {
+    const curVal = current[key];
+    const lastVal = lastSyncedMeta[key];
+    const remVal = remoteMeta ? remoteMeta[key] : undefined;
+    const pending = JSON.stringify(curVal) !== JSON.stringify(lastVal);
+    if (pending){
+      merged[key] = curVal; // cambio propio (p.ej. un cierre de caja) sin subir todavía: se respeta
+    } else if (remVal !== undefined){
+      merged[key] = remVal;
+      confirmedSynced[key] = remVal;
+    } else {
+      merged[key] = curVal;
+    }
+  });
+  return { mergedMeta: merged, confirmedMeta: confirmedSynced };
+}
+
 function applyRemoteSnapshot(remote){
   if (!remote) return false;
   let changed = false;
-  const remoteProducts = remote.products ? Object.values(remote.products) : [];
-  const remoteSales = remote.sales ? Object.values(remote.sales) : [];
-  const remotePending = remote.pendingSales ? Object.values(remote.pendingSales) : [];
-  const remoteMovements = remote.cashMovements ? Object.values(remote.cashMovements) : [];
-  const remoteClosures = remote.cashClosures ? Object.values(remote.cashClosures) : [];
-  const remoteMeta = remote.meta || null;
 
-  if (remoteMeta && JSON.stringify(remoteMeta) !== JSON.stringify(buildMetaObject())){
-    state.businessName = remoteMeta.businessName || state.businessName;
-    state.categories = remoteMeta.categories || state.categories;
-    state.gridSizes = (remoteMeta.gridSizes && remoteMeta.gridSizes.length) ? remoteMeta.gridSizes : state.gridSizes;
-    state.selectedGridSizeIndex = (remoteMeta.selectedGridSizeIndex !== undefined && remoteMeta.selectedGridSizeIndex !== null) ? remoteMeta.selectedGridSizeIndex : state.selectedGridSizeIndex;
-    state.cashRegister = remoteMeta.cashRegister !== undefined ? remoteMeta.cashRegister : state.cashRegister;
-    state.stockEnabled = remoteMeta.stockEnabled !== undefined ? remoteMeta.stockEnabled : state.stockEnabled;
-    state.theme = remoteMeta.theme || state.theme;
-    state.advancedConfigPassword = remoteMeta.advancedConfigPassword || state.advancedConfigPassword;
-    state.deletePassword = remoteMeta.deletePassword || state.deletePassword;
-    changed = true;
+  if (remote.meta){
+    const { mergedMeta, confirmedMeta } = mergeMetaWithRemote(remote.meta, lastSyncSnapshot.meta);
+    if (JSON.stringify(mergedMeta) !== JSON.stringify(buildMetaObject())){
+      state.businessName = mergedMeta.businessName;
+      state.categories = mergedMeta.categories || state.categories;
+      state.gridSizes = (mergedMeta.gridSizes && mergedMeta.gridSizes.length) ? mergedMeta.gridSizes : state.gridSizes;
+      state.selectedGridSizeIndex = (mergedMeta.selectedGridSizeIndex !== undefined && mergedMeta.selectedGridSizeIndex !== null) ? mergedMeta.selectedGridSizeIndex : state.selectedGridSizeIndex;
+      state.cashRegister = mergedMeta.cashRegister !== undefined ? mergedMeta.cashRegister : state.cashRegister;
+      state.stockEnabled = mergedMeta.stockEnabled !== undefined ? mergedMeta.stockEnabled : state.stockEnabled;
+      state.theme = mergedMeta.theme || state.theme;
+      state.advancedConfigPassword = mergedMeta.advancedConfigPassword || state.advancedConfigPassword;
+      state.deletePassword = mergedMeta.deletePassword || state.deletePassword;
+      changed = true;
+    }
+    lastSyncSnapshot.meta = confirmedMeta;
   }
-  if (remote.products && JSON.stringify(remoteProducts) !== JSON.stringify(state.products)){ state.products = remoteProducts; changed = true; }
-  if (remote.sales && JSON.stringify(remoteSales) !== JSON.stringify(state.sales)){ state.sales = remoteSales; changed = true; }
-  if (remote.pendingSales && JSON.stringify(remotePending) !== JSON.stringify(state.pendingSales)){ state.pendingSales = remotePending; changed = true; }
-  if (remote.cashMovements && JSON.stringify(remoteMovements) !== JSON.stringify(state.cashMovements)){ state.cashMovements = remoteMovements; changed = true; }
-  if (remote.cashClosures && JSON.stringify(remoteClosures) !== JSON.stringify(state.cashClosures)){ state.cashClosures = remoteClosures; changed = true; }
+
+  const collections = [
+    ["products", "products"],
+    ["sales", "sales"],
+    ["pendingSales", "pendingSales"],
+    ["cashMovements", "cashMovements"],
+    ["cashClosures", "cashClosures"]
+  ];
+  collections.forEach(([remoteKey, stateKey]) => {
+    if (!remote[remoteKey]) return;
+    const { mergedArr, confirmedMap } = mergeCollectionWithRemote(state[stateKey], remote[remoteKey], lastSyncSnapshot[stateKey]);
+    if (JSON.stringify(mergedArr) !== JSON.stringify(state[stateKey])){
+      state[stateKey] = mergedArr;
+      changed = true;
+    }
+    lastSyncSnapshot[stateKey] = confirmedMap;
+  });
 
   if (changed){
     applyDefaultsAndMigrations();
     localStorage.setItem("posShalomState", JSON.stringify(state));
   }
-
-  lastSyncSnapshot = {
-    products: arrayToMapById(state.products),
-    sales: arrayToMapById(state.sales),
-    pendingSales: arrayToMapById(state.pendingSales),
-    cashMovements: arrayToMapById(state.cashMovements),
-    cashClosures: arrayToMapById(state.cashClosures),
-    meta: buildMetaObject()
-  };
   return changed;
 }
 
@@ -3668,6 +3760,22 @@ async function startApp(){
       ]);
       const remote = snap.val();
       if (remote){
+        // Antes de fusionar, la "última foto confirmada" se inicializa con lo
+        // que trae Firebase (no con un objeto vacío): así, cualquier registro
+        // local que coincida con uno remoto se trata como ya sincronizado, y
+        // solo lo que sea distinto o exista nada más que localmente (por
+        // ejemplo, algo creado sin conexión que nunca llegó a subirse) se
+        // trata como pendiente de subir. Si se dejara vacío, cada registro
+        // local parecería "pendiente" y ganaría siempre sobre lo remoto, aun
+        // cuando lo remoto fuera más nuevo.
+        lastSyncSnapshot = {
+          products: remote.products || {},
+          sales: remote.sales || {},
+          pendingSales: remote.pendingSales || {},
+          cashMovements: remote.cashMovements || {},
+          cashClosures: remote.cashClosures || {},
+          meta: remote.meta || null
+        };
         applyRemoteSnapshot(remote);
         applyTheme();
         goToLanding();
