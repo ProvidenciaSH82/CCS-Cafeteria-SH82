@@ -614,6 +614,47 @@ function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
   return { mergedMeta: merged, confirmedMeta: confirmedSynced };
 }
 
+// Para cuando este dispositivo nunca sincronizó antes (lastSyncSnapshot.meta
+// === null): adopta lo que haya en Firebase de forma DIRECTA, sin pasar por
+// la comparación "¿esto coincide con lo último confirmado?" — porque, al no
+// haber nada confirmado todavía, esa comparación no tiene sentido y termina
+// tratando por error cualquier dato que solo exista en Firebase (y no en el
+// caché viejo de este dispositivo) como si hubiera sido "borrado
+// localmente". Ver la nota larga en startApp() sobre el bug real que esto
+// corrige.
+function adoptRemoteDirectly(remote){
+  state.products = remote.products ? Object.values(remote.products) : [];
+  state.sales = remote.sales ? Object.values(remote.sales) : [];
+  state.pendingSales = remote.pendingSales ? Object.values(remote.pendingSales) : [];
+  state.cashMovements = remote.cashMovements ? Object.values(remote.cashMovements) : [];
+  state.cashClosures = remote.cashClosures ? Object.values(remote.cashClosures) : [];
+  if (remote.meta){
+    const m = decodeMetaFromFirebase(remote.meta);
+    state.businessName = m.businessName;
+    state.categories = m.categories || state.categories;
+    state.gridSizes = (m.gridSizes && m.gridSizes.length) ? m.gridSizes : state.gridSizes;
+    state.selectedGridSizeIndex = (m.selectedGridSizeIndex !== undefined && m.selectedGridSizeIndex !== null) ? m.selectedGridSizeIndex : state.selectedGridSizeIndex;
+    state.cashRegister = m.cashRegister !== undefined ? m.cashRegister : state.cashRegister;
+    state.stockEnabled = m.stockEnabled !== undefined ? m.stockEnabled : state.stockEnabled;
+    state.theme = m.theme || state.theme;
+    state.advancedConfigPassword = m.advancedConfigPassword || state.advancedConfigPassword;
+    state.deletePassword = m.deletePassword || state.deletePassword;
+  }
+  // lastSyncSnapshot queda como un espejo EXACTO de lo que se acaba de
+  // adoptar — "state" y "lastSyncSnapshot" siempre consistentes entre sí,
+  // nunca un producto "confirmado" que en realidad no está en "state".
+  lastSyncSnapshot = {
+    products: remote.products || {},
+    sales: remote.sales || {},
+    pendingSales: remote.pendingSales || {},
+    cashMovements: remote.cashMovements || {},
+    cashClosures: remote.cashClosures || {},
+    meta: remote.meta ? decodeMetaFromFirebase(remote.meta) : null
+  };
+  applyDefaultsAndMigrations();
+  persistSyncState();
+}
+
 function applyRemoteSnapshot(remote){
   if (!remote) return false;
   let changed = false;
@@ -1497,7 +1538,7 @@ function renderClosuresList(){
         saveState();
         renderClosuresList();
       });
-    }, true);
+    }, true, {}, true);
   }));
 }
 
@@ -2400,7 +2441,7 @@ function deleteSale(saleId){
       saveState();
       renderHistory();
     });
-  }, true);
+  }, true, {}, true);
 }
 
 function editSale(saleId){
@@ -2508,7 +2549,7 @@ function renderProductAdminList(catId){
     openConfirmModal("Eliminar producto", "¿Seguro que quieres eliminar este producto?", () => {
       state.products = state.products.filter(p => p.id !== b.dataset.deleteProd);
       saveState(); renderProductAdminList(catId);
-    }, true);
+    }, true, {}, true);
   }));
 }
 
@@ -2874,7 +2915,7 @@ function deleteCategory(catId){
     state.categories = state.categories.filter(c => c.id !== catId);
     saveState();
     renderCategoryAdminList();
-  }, true);
+  }, true, {}, true);
 }
 
 // ---------- STOCK ----------
@@ -3344,6 +3385,7 @@ function promptPassword(title, message, getExpectedPassword, onSuccess){
       err.className = "import-feedback error";
     }
   });
+  setEnterConfirm("pwOk");
   setTimeout(() => { const el = document.getElementById("pwInput"); if (el) el.focus(); }, 50);
 }
 
@@ -3936,25 +3978,33 @@ async function startApp(){
         // "lastSyncSnapshot" desde la casilla combinada de este dispositivo,
         // si existía. Si "meta" sigue en null, es la marca de que este
         // dispositivo nunca sincronizó antes (o es la primera vez que se
-        // usa) — en ese caso no hay nada propio que proteger todavía, así
-        // que se adopta Firebase directo (se decodifica "meta" porque
-        // Firebase nunca guarda valores null tal cual, ver
-        // encodeMetaForFirebase/decodeMetaFromFirebase). Si ya había algo
-        // cargado, se respeta tal cual: es lo último que este dispositivo
-        // confirmó haber subido, y es el punto de comparación correcto
-        // para no confundir "dato simplemente viejo" con "cambio propio
-        // pendiente".
+        // usa).
         if (!lastSyncSnapshot || lastSyncSnapshot.meta === null){
-          lastSyncSnapshot = {
-            products: remote.products || {},
-            sales: remote.sales || {},
-            pendingSales: remote.pendingSales || {},
-            cashMovements: remote.cashMovements || {},
-            cashClosures: remote.cashClosures || {},
-            meta: decodeMetaFromFirebase(remote.meta) || null
-          };
+          // BUG REAL CORREGIDO AQUÍ: antes, en este caso, se "sembraba"
+          // lastSyncSnapshot = remoto y DESPUÉS se llamaba a la fusión
+          // normal (applyRemoteSnapshot), comparando local contra ese
+          // remoto recién copiado. El problema: para cualquier producto
+          // (o venta, cierre, etc.) que existiera en Firebase pero NO en
+          // los datos viejos/locales de este dispositivo, la fusión veía
+          // "localmente no lo tengo, pero 'lo último confirmado' dice que
+          // sí" y lo trataba como un presunto BORRADO LOCAL pendiente de
+          // confirmar — descartándolo del todo. Resultado: el dispositivo
+          // se quedaba solo con la intersección de lo viejo que ya tenía,
+          // perdiendo silenciosamente todo lo demás de Firebase (72
+          // productos reducidos a los pocos que coincidían) — y encima
+          // "lastSyncSnapshot" seguía marcando esos productos perdidos
+          // como "confirmados", así que el próximo envío de este
+          // dispositivo los habría mandado a BORRAR en Firebase para
+          // todos. Por eso un dispositivo con caché viejo podía mostrar
+          // "sincronizado" y aun así quedarse pegado en datos antiguos.
+          //
+          // La solución: cuando no hay nada propio confirmado todavía, no
+          // tiene sentido "comparar" nada — se adopta Firebase tal cual,
+          // de forma directa, sin pasar por la lógica de pendientes.
+          adoptRemoteDirectly(remote);
+        } else {
+          applyRemoteSnapshot(remote);
         }
-        applyRemoteSnapshot(remote);
         applyTheme();
         goToLanding();
         updateNewSaleLock();
