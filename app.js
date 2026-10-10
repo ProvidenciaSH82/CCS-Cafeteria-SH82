@@ -553,10 +553,25 @@ function mergeCollectionWithRemote(localArr, remoteObj, lastSyncedMap){
     } else if (hasRemote){
       merged[id] = remoteVal;
       confirmedSynced[id] = remoteVal;
-    } else if (hasLocal){
-      merged[id] = localVal;
     } else if (hasLastSynced){
-      delete confirmedSynced[id]; // remoto ya no lo tiene y no hay nada pendiente local: se eliminó en otro lado
+      // BUG REAL CORREGIDO AQUÍ: este registro NO está pendiente (coincide
+      // con lo último que este dispositivo confirmó haber subido) y remoto
+      // ya no lo tiene — eso solo puede significar que se eliminó desde
+      // OTRO dispositivo. Antes, este caso caía en la rama de abajo
+      // ("hasLocal") que simplemente conservaba la copia local para
+      // siempre, por eso una eliminación (de un producto, un cierre de
+      // caja, una venta) nunca llegaba a los demás dispositivos, mientras
+      // que una EDICIÓN sí funcionaba (porque para una edición "hasRemote"
+      // sigue siendo true, y esa rama de arriba sí se ejecutaba). Revisar
+      // esta condición ANTES de "hasLocal" es lo que hace que el borrado
+      // se respete igual que cualquier otro cambio remoto.
+      delete confirmedSynced[id];
+      // No se agrega a "merged": queda fuera del arreglo final en este dispositivo también.
+    } else if (hasLocal){
+      // Caso raro de respaldo: hay algo local que nunca se confirmó subido
+      // y tampoco está pendiente (no debería ocurrir en la práctica), se
+      // conserva por seguridad en vez de perderlo silenciosamente.
+      merged[id] = localVal;
     }
   });
   return { mergedArr: Object.values(merged), confirmedMap: confirmedSynced };
