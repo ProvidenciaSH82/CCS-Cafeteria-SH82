@@ -3349,12 +3349,47 @@ function openAdvancedConfigScreen(){
       <p class="muted" style="font-size:.85rem; margin-bottom:8px;">Protege la eliminación de ventas, cierres de caja y movimientos de dinero.</p>
       <button class="btn-primary" id="btnConfigDeletePassword" style="width:fit-content;">Configurar</button>
     </div>
+    <div class="settings-block" style="max-width:100%; margin-top:16px;">
+      <label>Forzar resincronización completa</label>
+      <p class="muted" style="font-size:.85rem; margin-bottom:8px;">
+        Úsalo SOLO desde el dispositivo que tenga la información más completa y correcta
+        (todos los productos, todo el historial). Vuelve a subir absolutamente todo lo de
+        este dispositivo a la nube, sin borrar nada de lo que tengan los demás — sirve para
+        poner a todos de acuerdo cuando algunos dispositivos quedaron con listas distintas.
+      </p>
+      <button class="btn-primary" id="btnForceResync" style="width:fit-content;">Forzar resincronización completa</button>
+    </div>
     <div class="modal-actions" style="margin-top:20px;">
       <button class="modal-confirm" id="advConfigClose" style="flex:1;">Cerrar</button>
     </div>
   `);
   document.getElementById("advConfigClose").addEventListener("click", closeModal);
   document.getElementById("btnConfigDeletePassword").addEventListener("click", openChangeDeletePasswordModal);
+  document.getElementById("btnForceResync").addEventListener("click", () => {
+    openConfirmModal(
+      "Forzar resincronización completa",
+      "Esto va a volver a subir TODO lo que este dispositivo tiene (productos, categorías, ventas, historial de cierres, apertura/cierre actual) como si nunca se hubiera sincronizado antes. No borra nada de lo que tengan otros dispositivos: solo agrega o corrige. Úsalo nada más desde el dispositivo con la información más completa y correcta. ¿Continuar?",
+      () => forceFullResync(),
+      false,
+      { confirm: "Sí, resincronizar todo" }
+    );
+  });
+}
+
+// "Olvida" lo que este dispositivo cree tener confirmado con Firebase (sin
+// tocar los datos reales) y fuerza un envío inmediato y completo. Como
+// pushStateToFirebase() solo manda un "borrar" para un id que estaba en el
+// registro de confirmados y ya no está localmente, vaciar ese registro
+// hace que esta subida sea puramente aditiva: todo lo de este dispositivo
+// se sube de nuevo, pero no se borra nada de lo que Firebase tenga y este
+// dispositivo no conozca.
+function forceFullResync(){
+  lastSyncSnapshot = { products: {}, sales: {}, pendingSales: {}, cashMovements: {}, cashClosures: {}, meta: null };
+  persistSyncState();
+  clearTimeout(fbPushTimer);
+  pushStateToFirebase();
+  closeModal();
+  alert("Resincronización enviada. En unos segundos, los demás dispositivos deberían ponerse al día automáticamente.");
 }
 
 function openChangeDeletePasswordModal(){
