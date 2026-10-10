@@ -52,26 +52,53 @@ let appStarted = false; // evita sincronizar antes de haber comparado con Fireba
 let fbPushTimer = null;
 let lastSyncSnapshot = { products: {}, sales: {}, pendingSales: {}, cashMovements: {}, cashClosures: {}, meta: null };
 
-// Guarda en este dispositivo cuál fue la última versión de cada dato que se
-// confirmó subida a Firebase. Sin esto, cada vez que se abre la página se
-// "olvida" qué era realmente un cambio propio sin subir y qué simplemente
-// era un dato viejo — y un dispositivo que estuvo mucho tiempo sin abrirse
-// terminaría tratando TODOS sus datos desactualizados como "cambios
-// propios pendientes", sobrescribiendo en Firebase lo nuevo que otros
-// dispositivos generaron mientras tanto.
-const LAST_SYNC_STORAGE_KEY = "posShalomLastSyncSnapshot";
-function persistLastSyncSnapshot(){
+// Guarda en este dispositivo, en UNA SOLA casilla y de una sola vez, tanto
+// los datos (state) como el registro de qué se confirmó subido a Firebase
+// (lastSyncSnapshot). Antes estaban en dos casillas separadas, escritas en
+// momentos distintos — eso permitía que quedaran desincronizadas entre sí
+// (por ejemplo, por una pestaña vieja guardando solo una de las dos), lo
+// que hacía que el sistema creyera que productos reales "se habían
+// borrado localmente" y mandara ese borrado a Firebase para todos.
+// Guardándolas siempre juntas, en la misma escritura, esto ya no puede
+// pasar: las dos reflejan siempre el mismo instante.
+const SYNC_STORAGE_KEY = "posShalomSyncState";
+// Casillas antiguas (de versiones previas a este arreglo), solo para
+// migrar datos de dispositivos que ya las tenían guardadas.
+const LEGACY_STATE_KEY = "posShalomState";
+const LEGACY_LAST_SYNC_KEY = "posShalomLastSyncSnapshot";
+function persistSyncState(){
   try {
-    localStorage.setItem(LAST_SYNC_STORAGE_KEY, JSON.stringify(lastSyncSnapshot));
+    localStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify({ state, lastSyncSnapshot }));
   } catch (err){
-    console.error("No se pudo guardar el estado de sincronización localmente:", err);
+    console.error("No se pudo guardar el estado localmente:", err);
+    alert("No se pudo guardar la información (posiblemente el almacenamiento está lleno, por ejemplo por un logo muy grande). Intenta con una imagen más pequeña.");
   }
 }
-function loadPersistedLastSyncSnapshot(){
+function loadPersistedSyncState(){
   try {
-    const raw = localStorage.getItem(LAST_SYNC_STORAGE_KEY);
+    const raw = localStorage.getItem(SYNC_STORAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.state) return null;
+    return parsed;
+  } catch (err){
+    return null;
+  }
+}
+// Migración desde las dos casillas antiguas y separadas (si un dispositivo
+// las tiene de antes de este arreglo, pero todavía no tiene la casilla
+// combinada nueva).
+function loadLegacySeparateState(){
+  try {
+    const rawState = localStorage.getItem(LEGACY_STATE_KEY);
+    if (!rawState) return null;
+    const legacyState = JSON.parse(rawState);
+    let legacySync = null;
+    try {
+      const rawSync = localStorage.getItem(LEGACY_LAST_SYNC_KEY);
+      if (rawSync) legacySync = JSON.parse(rawSync);
+    } catch (err){ /* ignorar */ }
+    return { state: legacyState, lastSyncSnapshot: legacySync };
   } catch (err){
     return null;
   }
@@ -169,14 +196,25 @@ function migrateJornadaNumbers(){
 }
 
 function loadLocalOrSeed(){
-  const saved = localStorage.getItem("posShalomState");
-  if (saved){
-    state = JSON.parse(saved);
+  const combined = loadPersistedSyncState();
+  if (combined){
+    state = combined.state;
+    if (combined.lastSyncSnapshot) lastSyncSnapshot = combined.lastSyncSnapshot;
   } else {
-    seedData();
+    const legacy = loadLegacySeparateState();
+    if (legacy){
+      state = legacy.state;
+      if (legacy.lastSyncSnapshot) lastSyncSnapshot = legacy.lastSyncSnapshot;
+    } else {
+      seedData();
+    }
   }
   applyDefaultsAndMigrations();
-  saveState();
+  // Se guarda localmente nomás (sin programar un envío a Firebase): recién
+  // arrancando todavía no se sabe qué hay en Firebase, y programar un envío
+  // aquí podría ganarle la carrera a la lectura real si la conexión está
+  // lenta, subiendo datos desactualizados antes de poder compararlos.
+  persistSyncState();
 }
 
 // Migración: asegura que estados guardados antes de estas mejoras (o que
@@ -217,12 +255,7 @@ function applyDefaultsAndMigrations(){
 }
 
 function saveState(){
-  try {
-    localStorage.setItem("posShalomState", JSON.stringify(state));
-  } catch (err){
-    console.error("No se pudo guardar el estado:", err);
-    alert("No se pudo guardar la información (posiblemente el almacenamiento está lleno, por ejemplo por un logo muy grande). Intenta con una imagen más pequeña.");
-  }
+  persistSyncState();
   scheduleFirebaseSync();
 }
 
@@ -407,7 +440,7 @@ function pushStateToFirebase(){
     if (Object.keys(updates).length === 0) return;
     fbRootRef.update(updates).then(() => {
       lastSyncSnapshot = { products: p.currentMap, sales: s.currentMap, pendingSales: ps.currentMap, cashMovements: cm.currentMap, cashClosures: cc.currentMap, meta: metaObj };
-      persistLastSyncSnapshot();
+      persistSyncState();
       setFbStatus("ok");
     }).catch(err => {
       console.error("No se pudo sincronizar con Firebase (revisa las reglas de la base de datos en Firebase Console):", err);
@@ -427,6 +460,30 @@ function refreshVisibleView(){
   applyTheme();
   renderSidebarNav();
   updateNewSaleLock();
+
+  // Si justo llegó un cierre de caja hecho desde OTRO dispositivo y este
+  // está parado en una pantalla que necesita caja abierta (vendiendo, o en
+  // Entrega de pedidos), se lo saca de ahí y se lo manda a Inicio — tal
+  // como pidió el negocio: "si alguien realiza cierre de caja... al otro
+  // dispositivo activado, directamente se le cierra y lo manda al sector
+  // de inicio". Sin esto, el candado solo deshabilitaba el botón del menú,
+  // pero no sacaba a nadie de una venta ya abierta en pantalla.
+  if (!state.cashRegister && (currentArea === "cajero" || currentArea === "entrega")){
+    const activeViewNow = document.querySelector(".view.active");
+    const viewNameNow = activeViewNow ? activeViewNow.id.replace("view-", "") : null;
+    const needsOpenRegister = currentArea === "entrega" || viewNameNow === "newsale";
+    if (needsOpenRegister){
+      goToLanding();
+      showModal(`
+        <h2>Caja cerrada</h2>
+        <p class="muted">Se cerró la caja desde otro dispositivo. Vuelve a abrir caja para seguir vendiendo.</p>
+        <div class="modal-actions"><button class="modal-confirm" id="cashClosedRemoteOk" style="flex:1;">Aceptar</button></div>
+      `);
+      document.getElementById("cashClosedRemoteOk").addEventListener("click", closeModal);
+      return;
+    }
+  }
+
   if (currentArea === "landing"){
     document.getElementById("landingBrandName").textContent = state.businessName;
     return;
@@ -581,11 +638,10 @@ function applyRemoteSnapshot(remote){
     lastSyncSnapshot[stateKey] = confirmedMap;
   });
 
-  persistLastSyncSnapshot();
   if (changed){
     applyDefaultsAndMigrations();
-    localStorage.setItem("posShalomState", JSON.stringify(state));
   }
+  persistSyncState();
   return changed;
 }
 
@@ -3826,18 +3882,19 @@ async function startApp(){
       ]);
       const remote = snap.val();
       if (remote){
-        const persisted = loadPersistedLastSyncSnapshot();
-        if (persisted){
-          // Este dispositivo ya sincronizó antes: se usa lo último que
-          // confirmó haber subido como punto de comparación, para no
-          // confundir "dato simplemente viejo" con "cambio propio
-          // pendiente" (ver nota arriba de loadPersistedLastSyncSnapshot).
-          lastSyncSnapshot = persisted;
-        } else {
-          // Primera vez que este dispositivo sincroniza: no hay nada propio
-          // que proteger todavía, así que se adopta Firebase directo (se
-          // decodifica "meta" porque Firebase nunca guarda valores null tal
-          // cual, ver encodeMetaForFirebase/decodeMetaFromFirebase).
+        // loadLocalOrSeed() (llamado al principio de startApp) ya cargó
+        // "lastSyncSnapshot" desde la casilla combinada de este dispositivo,
+        // si existía. Si "meta" sigue en null, es la marca de que este
+        // dispositivo nunca sincronizó antes (o es la primera vez que se
+        // usa) — en ese caso no hay nada propio que proteger todavía, así
+        // que se adopta Firebase directo (se decodifica "meta" porque
+        // Firebase nunca guarda valores null tal cual, ver
+        // encodeMetaForFirebase/decodeMetaFromFirebase). Si ya había algo
+        // cargado, se respeta tal cual: es lo último que este dispositivo
+        // confirmó haber subido, y es el punto de comparación correcto
+        // para no confundir "dato simplemente viejo" con "cambio propio
+        // pendiente".
+        if (!lastSyncSnapshot || lastSyncSnapshot.meta === null){
           lastSyncSnapshot = {
             products: remote.products || {},
             sales: remote.sales || {},
