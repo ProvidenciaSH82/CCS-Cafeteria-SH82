@@ -685,8 +685,22 @@ function applyRemoteSnapshot(remote){
     ["cashClosures", "cashClosures"]
   ];
   collections.forEach(([remoteKey, stateKey]) => {
-    if (!remote[remoteKey]) return;
-    const { mergedArr, confirmedMap } = mergeCollectionWithRemote(state[stateKey], remote[remoteKey], lastSyncSnapshot[stateKey]);
+    // BUG REAL CORREGIDO AQUÍ: antes, si remote[remoteKey] no existía (por
+    // ejemplo "cashClosures"), se salía sin fusionar nada. Eso parecía
+    // correcto cuando esa colección sencillamente nunca se usó, pero
+    // Firebase Realtime Database BORRA por completo una clave cuando su
+    // último hijo se elimina — o sea, al eliminar el ÚLTIMO cierre de caja
+    // (o la última venta, el último producto, etc.) desde un dispositivo,
+    // "cashClosures" deja de existir en Firebase, remote.cashClosures queda
+    // undefined, y este "return" anticipado hacía que los demás
+    // dispositivos NUNCA se enteraran de esa eliminación: su copia local
+    // (que sí tenía ese último registro) se quedaba intacta para siempre,
+    // por más que recargaran o forzaran la actualización. La solución:
+    // tratar "la clave no existe en Firebase" exactamente igual que "existe
+    // pero está vacía" ({}), y dejar que mergeCollectionWithRemote (que ya
+    // sabe distinguir una eliminación remota de un cambio local pendiente)
+    // decida registro por registro, en vez de saltarse toda la colección.
+    const { mergedArr, confirmedMap } = mergeCollectionWithRemote(state[stateKey], remote[remoteKey] || {}, lastSyncSnapshot[stateKey]);
     if (JSON.stringify(mergedArr) !== JSON.stringify(state[stateKey])){
       state[stateKey] = mergedArr;
       changed = true;
