@@ -979,6 +979,21 @@ function switchView(viewName){
   if (viewName === "productospendientes") renderProductosPendientes();
   if (viewName === "cocina") renderCocina();
   if (viewName === "pedidosfinalizados") renderPedidosFinalizados();
+  // BUG REAL CORREGIDO AQUÍ: el detalle de un pedido (donde se toca cada
+  // producto para marcarlo entregado) se abre con switchViewRaw(), no con
+  // switchView(), así que esta lista de "qué volver a dibujar según la
+  // pantalla activa" nunca incluía "deliverydetail" — faltaba acá. Cuando
+  // refreshVisibleView() (lo que se ejecuta cada vez que llega un cambio de
+  // OTRO dispositivo) detectaba que la pantalla activa era el detalle de un
+  // pedido, terminaba llamando switchView("deliverydetail") de todos modos,
+  // pero como ningún "if" de aquí coincidía, no pasaba nada: la pantalla se
+  // quedaba congelada con los datos de cuando se abrió. Por eso, al entregar
+  // el primer producto parecía sincronizar bien (la pantalla recién se había
+  // abierto con ese dato ya puesto), pero cualquier entrega o "Finalizar
+  // pedido" hecha DESPUÉS, mientras esa pantalla seguía abierta en otros
+  // dispositivos, nunca se veía reflejada ahí — aunque sí había llegado y
+  // sí estaba guardada correctamente por debajo.
+  if (viewName === "deliverydetail") renderDeliveryDetail();
   if (viewName === "visibility") renderVisibilityScreen();
   if (viewName === "stock") renderStockScreen();
   if (viewName === "stocklow") renderStockLowScreen();
