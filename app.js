@@ -304,6 +304,28 @@ function arrayToMapById(arr){
   return map;
 }
 
+// BUG REAL CORREGIDO AQUÍ — el más serio de todos los de sincronización:
+// "lastSyncSnapshot" (lo último que SABEMOS que ya está confirmado en
+// Firebase) se armaba guardando el MISMO objeto en memoria que después
+// queda también dentro de "state" (lo que se ve y edita en pantalla) — no
+// una copia independiente. Mientras una edición se hiciera reemplazando el
+// registro entero (como al borrar o editar precio, que arman un objeto
+// nuevo) no pasaba nada. Pero "Finalizar pedido" y marcar una unidad como
+// entregada MODIFICAN el objeto de la venta QUE YA ESTABA AHÍ, campo por
+// campo (sale.delivery.finalized = true; unit.delivered = true). Como ese
+// objeto era el MISMO que "lastSyncSnapshot" tenía guardado como "ya
+// confirmado", el cambio se filtraba también hacia "lastSyncSnapshot" sin
+// pasar por Firebase — y el sistema, al comparar antes de subir, veía los
+// dos lados IGUALES ("no hay nada pendiente que subir") y nunca mandaba el
+// cambio a la nube. Por eso finalizar un pedido podía no sincronizarse con
+// ningún otro dispositivo nunca, ni en vivo ni recargando: el dato jamás
+// salió de ese dispositivo. La solución: cada vez que algo se guarda como
+// "confirmado" en lastSyncSnapshot, se guarda una COPIA independiente, no
+// el mismo objeto que sigue viviendo en "state".
+function deepClone(value){
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
 function buildMetaObject(){
   return {
     businessName: state.businessName,
@@ -416,7 +438,14 @@ function diffCollectionUpdates(basePath, currentArr, lastMap){
   Object.keys(lastMap).forEach(id => {
     if (!currentMap[id]) updates[`${basePath}/${id}`] = null;
   });
-  return { updates, currentMap };
+  // "currentMap" se usa después para marcar estos registros como
+  // "confirmados" en lastSyncSnapshot — tiene que ser una copia
+  // independiente de los objetos de "state" (ver el comentario grande junto
+  // a deepClone()), si no, editar un pedido/producto más tarde "ensucia" en
+  // silencio lo que creíamos ya confirmado y ese cambio deja de subirse.
+  const currentMapForSnapshot = {};
+  Object.keys(currentMap).forEach(id => { currentMapForSnapshot[id] = deepClone(currentMap[id]); });
+  return { updates, currentMap: currentMapForSnapshot };
 }
 
 function scheduleFirebaseSync(){
@@ -439,7 +468,14 @@ function pushStateToFirebase(){
     if (metaChanged) updates["meta"] = encodeMetaForFirebase(metaObj);
     if (Object.keys(updates).length === 0) return;
     fbRootRef.update(updates).then(() => {
-      lastSyncSnapshot = { products: p.currentMap, sales: s.currentMap, pendingSales: ps.currentMap, cashMovements: cm.currentMap, cashClosures: cc.currentMap, meta: metaObj };
+      // "meta" (categorías, tema, etc.) tiene arreglos/objetos anidados que
+      // "buildMetaObject()" toma DIRECTO de "state" (p.ej. categories:
+      // state.categories, el mismo arreglo, no una copia) — guardar ese
+      // mismo objeto como "confirmado" tiene el mismo problema explicado
+      // junto a deepClone(): una edición posterior en el mismo lugar (como
+      // "cat.name = ...") ensuciaría el "confirmado" sin pasar por
+      // Firebase. Por eso se clona antes de guardarlo como lastSyncSnapshot.
+      lastSyncSnapshot = { products: p.currentMap, sales: s.currentMap, pendingSales: ps.currentMap, cashMovements: cm.currentMap, cashClosures: cc.currentMap, meta: deepClone(metaObj) };
       persistSyncState();
       setFbStatus("ok");
     }).catch(err => {
@@ -552,7 +588,12 @@ function mergeCollectionWithRemote(localArr, remoteObj, lastSyncedMap){
       // no se toca confirmedSynced[id]: el próximo push lo va a detectar y subir.
     } else if (hasRemote){
       merged[id] = remoteVal;
-      confirmedSynced[id] = remoteVal;
+      // Copia independiente para "confirmado" — si se guardara el MISMO
+      // objeto que "merged" (y por lo tanto, en breve, "state"), cualquier
+      // edición posterior que modifique ese registro EN EL MISMO LUGAR (en
+      // vez de reemplazarlo entero) ensuciaría también la copia de
+      // "confirmado" sin pasar por Firebase. Ver deepClone() más arriba.
+      confirmedSynced[id] = deepClone(remoteVal);
     } else if (hasLastSynced){
       // BUG REAL CORREGIDO AQUÍ: este registro NO está pendiente (coincide
       // con lo último que este dispositivo confirmó haber subido) y remoto
@@ -606,7 +647,12 @@ function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
       merged[key] = curVal; // cambio propio (p.ej. un cierre de caja) sin subir todavía: se respeta
     } else if (remVal !== undefined){
       merged[key] = remVal;
-      confirmedSynced[key] = remVal;
+      // Copia independiente — "categories" y "theme" son objetos/arreglos, y
+      // varias partes del código los editan en el mismo lugar (por ejemplo
+      // "cat.name = nuevoNombre"); sin deepClone aquí, esa edición
+      // ensuciaría también la copia "confirmada" sin pasar por Firebase,
+      // igual que el bug grande de deepClone() explicado más arriba.
+      confirmedSynced[key] = deepClone(remVal);
     } else {
       merged[key] = curVal;
     }
@@ -623,33 +669,66 @@ function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
 // localmente". Ver la nota larga en startApp() sobre el bug real que esto
 // corrige.
 function adoptRemoteDirectly(remote){
-  state.products = remote.products ? Object.values(remote.products) : [];
-  state.sales = remote.sales ? Object.values(remote.sales) : [];
-  state.pendingSales = remote.pendingSales ? Object.values(remote.pendingSales) : [];
-  state.cashMovements = remote.cashMovements ? Object.values(remote.cashMovements) : [];
-  state.cashClosures = remote.cashClosures ? Object.values(remote.cashClosures) : [];
-  if (remote.meta){
-    const m = decodeMetaFromFirebase(remote.meta);
-    state.businessName = m.businessName;
-    state.categories = m.categories || state.categories;
-    state.gridSizes = (m.gridSizes && m.gridSizes.length) ? m.gridSizes : state.gridSizes;
-    state.selectedGridSizeIndex = (m.selectedGridSizeIndex !== undefined && m.selectedGridSizeIndex !== null) ? m.selectedGridSizeIndex : state.selectedGridSizeIndex;
-    state.cashRegister = m.cashRegister !== undefined ? m.cashRegister : state.cashRegister;
-    state.stockEnabled = m.stockEnabled !== undefined ? m.stockEnabled : state.stockEnabled;
-    state.theme = m.theme || state.theme;
-    state.advancedConfigPassword = m.advancedConfigPassword || state.advancedConfigPassword;
-    state.deletePassword = m.deletePassword || state.deletePassword;
+  // BUG REAL CORREGIDO AQUÍ (la misma causa explicada junto a deepClone()
+  // más arriba, pero colada de nuevo por otra puerta): esta función armaba
+  // "state" con Object.values(remote.X) y por separado guardaba
+  // "lastSyncSnapshot.X = remote.X" — el MISMO objeto "remote.X", así que
+  // cada venta, producto o cierre en "state" terminaba siendo LITERALMENTE
+  // el mismo objeto en memoria que su versión "confirmada" en
+  // lastSyncSnapshot. En cuanto este dispositivo editaba algo EN EL MISMO
+  // LUGAR en vez de reemplazar el registro entero (p.ej. "Finalizar
+  // pedido", marcar una unidad entregada, cambiar el stock de un
+  // producto), ese cambio se filtraba también hacia "lastSyncSnapshot" sin
+  // pasar por Firebase, y el próximo envío no detectaba ninguna diferencia
+  // que subir — el cambio nunca salía de ese dispositivo, para nadie, ni
+  // en vivo ni recargando. Esto pasaba en CUALQUIER dispositivo que
+  // hubiera adoptado sus datos por esta vía (la primera vez que sincroniza,
+  // o cualquier carga sin nada confirmado todavía), no solo en el teléfono
+  // del caso original. La solución: clonar también acá, para que "state" y
+  // "lastSyncSnapshot" nunca compartan el mismo objeto en memoria.
+  state.products = remote.products ? deepClone(Object.values(remote.products)) : [];
+  state.sales = remote.sales ? deepClone(Object.values(remote.sales)) : [];
+  state.pendingSales = remote.pendingSales ? deepClone(Object.values(remote.pendingSales)) : [];
+  state.cashMovements = remote.cashMovements ? deepClone(Object.values(remote.cashMovements)) : [];
+  state.cashClosures = remote.cashClosures ? deepClone(Object.values(remote.cashClosures)) : [];
+  // Mismo riesgo que arriba, pero con "meta": decodeMetaFromFirebase() solo
+  // copia el objeto de primer nivel (Object.assign), no sus arreglos/objetos
+  // internos (categorías, tema, cuadrícula) — así que llamarla dos veces
+  // sobre el mismo "remote.meta" (una para "state", otra para
+  // "lastSyncSnapshot") igual deja esos arreglos internos apuntando al
+  // MISMO objeto en memoria en los dos lados. Por eso, por ejemplo, renombrar
+  // una categoría ("cat.name = ...", que modifica el objeto existente en vez
+  // de reemplazarlo) podía no subirse nunca en un dispositivo recién
+  // sincronizado así. Se decodifica una sola vez y se clona por separado
+  // para cada lado.
+  const decodedMeta = remote.meta ? decodeMetaFromFirebase(remote.meta) : null;
+  if (decodedMeta){
+    state.businessName = decodedMeta.businessName;
+    state.categories = decodedMeta.categories ? deepClone(decodedMeta.categories) : state.categories;
+    state.gridSizes = (decodedMeta.gridSizes && decodedMeta.gridSizes.length) ? deepClone(decodedMeta.gridSizes) : state.gridSizes;
+    state.selectedGridSizeIndex = (decodedMeta.selectedGridSizeIndex !== undefined && decodedMeta.selectedGridSizeIndex !== null) ? decodedMeta.selectedGridSizeIndex : state.selectedGridSizeIndex;
+    state.cashRegister = decodedMeta.cashRegister !== undefined ? deepClone(decodedMeta.cashRegister) : state.cashRegister;
+    state.stockEnabled = decodedMeta.stockEnabled !== undefined ? decodedMeta.stockEnabled : state.stockEnabled;
+    state.theme = decodedMeta.theme ? deepClone(decodedMeta.theme) : state.theme;
+    state.advancedConfigPassword = decodedMeta.advancedConfigPassword || state.advancedConfigPassword;
+    state.deletePassword = decodedMeta.deletePassword || state.deletePassword;
   }
   // lastSyncSnapshot queda como un espejo EXACTO de lo que se acaba de
   // adoptar — "state" y "lastSyncSnapshot" siempre consistentes entre sí,
-  // nunca un producto "confirmado" que en realidad no está en "state".
+  // nunca un producto "confirmado" que en realidad no está en "state". Son
+  // copias INDEPENDIENTES (deepClone): "state.products" y
+  // "lastSyncSnapshot.products", arriba, se armaron los dos a partir de
+  // "remote.products", así que sin esto apuntarían a los mismos objetos en
+  // memoria, y el bug grande de más arriba (ver deepClone()) volvería a
+  // aparecer apenas alguien editara un registro recién adoptado así. Mismo
+  // motivo para clonar "decodedMeta" acá en vez de reusarlo tal cual.
   lastSyncSnapshot = {
-    products: remote.products || {},
-    sales: remote.sales || {},
-    pendingSales: remote.pendingSales || {},
-    cashMovements: remote.cashMovements || {},
-    cashClosures: remote.cashClosures || {},
-    meta: remote.meta ? decodeMetaFromFirebase(remote.meta) : null
+    products: deepClone(remote.products) || {},
+    sales: deepClone(remote.sales) || {},
+    pendingSales: deepClone(remote.pendingSales) || {},
+    cashMovements: deepClone(remote.cashMovements) || {},
+    cashClosures: deepClone(remote.cashClosures) || {},
+    meta: decodedMeta ? deepClone(decodedMeta) : null
   };
   applyDefaultsAndMigrations();
   persistSyncState();
