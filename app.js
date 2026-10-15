@@ -219,6 +219,45 @@ function loadLocalOrSeed(){
 
 // Migración: asegura que estados guardados antes de estas mejoras (o que
 // llegan recién descargados de Firebase) tengan todos los campos nuevos.
+// Completa los campos que le falten a un producto (por ejemplo los que se
+// importaron sin ellos). IMPORTANTE: lo que Firebase confirma como "ya subido"
+// (lastSyncSnapshot) tiene que completarse EXACTAMENTE igual que "state"; si
+// no, el producto de "state" (completado) y el "confirmado" (sin completar)
+// nunca coinciden, el sistema cree que hay un cambio propio sin subir para
+// siempre, descarta lo que llega de otros dispositivos (p.ej. el stock que
+// bajó otra caja) y encima sube de vuelta su valor viejo pisando el de todos.
+function normalizeProductDefaults(p, idx){
+  if (p.cost === undefined || p.cost === null) p.cost = 0;
+  if (p.stock === undefined || p.stock === null) p.stock = 0;
+  if (p.stockMin === undefined || p.stockMin === null) p.stockMin = 0;
+  if (p.stockTracked === undefined || p.stockTracked === null) p.stockTracked = false;
+  if (p.advanced === undefined || p.advanced === null) p.advanced = false;
+  if (!p.questions) p.questions = [];
+  if (p.kitchen === undefined || p.kitchen === null) p.kitchen = false;
+  if (p.order === undefined || p.order === null) p.order = idx;
+}
+function normalizeSnapshotDefaults(){
+  if (!lastSyncSnapshot) return;
+  if (lastSyncSnapshot.products){
+    const idxById = {};
+    state.products.forEach((p, i) => { idxById[String(p.id)] = i; });
+    Object.keys(lastSyncSnapshot.products).forEach(id => {
+      const sp = lastSyncSnapshot.products[id];
+      if (sp && typeof sp === "object") normalizeProductDefaults(sp, idxById[id] !== undefined ? idxById[id] : 0);
+    });
+  }
+  if (lastSyncSnapshot.sales){
+    Object.keys(lastSyncSnapshot.sales).forEach(id => {
+      const ss = lastSyncSnapshot.sales[id];
+      if (ss && typeof ss === "object" && !ss.delivery && ss.items){
+        ss.delivery = { units: generateDeliveryUnits(ss.items, true), finalized: true };
+      }
+    });
+  }
+  // La cuadrícula elegida es individual de cada dispositivo: no se sincroniza.
+  if (lastSyncSnapshot.meta) delete lastSyncSnapshot.meta.selectedGridSizeIndex;
+}
+
 function applyDefaultsAndMigrations(){
   if (!state.pendingSales) state.pendingSales = [];
   if (!state.gridSizes || state.gridSizes.length === 0) state.gridSizes = defaultGridSizes();
@@ -226,16 +265,8 @@ function applyDefaultsAndMigrations(){
     const idx = state.gridSizes.findIndex(g => g.rows === 3 && g.cols === 3);
     state.selectedGridSizeIndex = idx >= 0 ? idx : 0;
   }
-  state.products.forEach((p, idx) => {
-    if (p.cost === undefined || p.cost === null) p.cost = 0;
-    if (p.stock === undefined || p.stock === null) p.stock = 0;
-    if (p.stockMin === undefined || p.stockMin === null) p.stockMin = 0;
-    if (p.stockTracked === undefined || p.stockTracked === null) p.stockTracked = false;
-    if (p.advanced === undefined || p.advanced === null) p.advanced = false;
-    if (!p.questions) p.questions = [];
-    if (p.kitchen === undefined || p.kitchen === null) p.kitchen = false;
-    if (p.order === undefined || p.order === null) p.order = idx;
-  });
+  state.products.forEach((p, idx) => normalizeProductDefaults(p, idx));
+  normalizeSnapshotDefaults();
   if (state.cashRegister === undefined) state.cashRegister = null;
   if (!state.cashClosures) state.cashClosures = [];
   if (!state.cashMovements) state.cashMovements = [];
@@ -326,12 +357,26 @@ function deepClone(value){
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
+// Comparación de datos que NO depende del orden de las claves. JSON.stringify
+// escribe las claves en el orden en que se crearon, así que dos copias con
+// exactamente los mismos datos pero con las claves en otro orden (algo que
+// pasa seguido: uno armado localmente, otro bajado de Firebase) parecían
+// "distintas" y quedaban marcadas como cambio pendiente para siempre.
+function sortedById(arr){
+  return (arr || []).slice().sort((a, b) => String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0);
+}
+function stableStringify(value){
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+  return "{" + Object.keys(value).filter(k => value[k] !== undefined).sort().map(k => JSON.stringify(k) + ":" + stableStringify(value[k])).join(",") + "}";
+}
+
 function buildMetaObject(){
   return {
     businessName: state.businessName,
     categories: state.categories,
     gridSizes: state.gridSizes,
-    selectedGridSizeIndex: state.selectedGridSizeIndex,
     cashRegister: state.cashRegister,
     stockEnabled: state.stockEnabled,
     theme: state.theme,
@@ -365,6 +410,9 @@ function decodeMetaFromFirebase(remoteMeta){
   Object.keys(out).forEach(key => {
     if (out[key] === FB_NULL_MARKER) out[key] = null;
   });
+  // La cuadrícula elegida es individual de cada dispositivo (cada uno la
+  // acomoda a su pantalla): se ignora aunque haya quedado guardada en la nube.
+  delete out.selectedGridSizeIndex;
   // Compatibilidad con datos ya guardados antes de este arreglo: si la clave
   // cashRegister directamente no existe (quedó borrada por el bug de arriba),
   // se trata como caja cerrada en vez de como "dato desconocido".
@@ -431,7 +479,7 @@ function diffCollectionUpdates(basePath, currentArr, lastMap){
   Object.keys(currentMap).forEach(id => {
     const cur = currentMap[id];
     const prev = lastMap[id];
-    if (!prev || JSON.stringify(prev) !== JSON.stringify(cur)){
+    if (!prev || stableStringify(prev) !== stableStringify(cur)){
       updates[`${basePath}/${id}`] = cur;
     }
   });
@@ -446,6 +494,39 @@ function diffCollectionUpdates(basePath, currentArr, lastMap){
   const currentMapForSnapshot = {};
   Object.keys(currentMap).forEach(id => { currentMapForSnapshot[id] = deepClone(currentMap[id]); });
   return { updates, currentMap: currentMapForSnapshot };
+}
+
+// STOCK COMPARTIDO ENTRE CAJAS. Antes, cada cambio de un producto subía el
+// producto entero con su stock como número absoluto ("quedan 47"). Dos cajas
+// que vendían casi a la vez se pisaban: la última en subir ganaba y la venta
+// de la otra se "perdía" del stock. Ahora, para un producto que ya existía,
+// se suben solo los campos que cambiaron, y el stock se sube como una
+// DIFERENCIA ATÓMICA (-3, +3...) que Firebase suma en el servidor: no
+// importa en qué orden lleguen las ventas de distintas cajas, el stock final
+// siempre es la suma de todas. Si Firebase no ofrece increment (por ejemplo en
+// pruebas sin conexión), se usa el valor absoluto como antes.
+function toFieldLevelProductUpdates(prodUpdates, lastMap){
+  const out = {};
+  const inc = (typeof firebase !== "undefined" && firebase.database && firebase.database.ServerValue && firebase.database.ServerValue.increment) ? firebase.database.ServerValue.increment : null;
+  Object.keys(prodUpdates).forEach(path => {
+    const val = prodUpdates[path];
+    const id = path.split("/")[1];
+    const prev = lastMap ? lastMap[id] : undefined;
+    if (val === null || !prev || typeof prev !== "object"){
+      out[path] = val; // producto nuevo o eliminado: tal cual
+      return;
+    }
+    const keys = new Set([...Object.keys(prev), ...Object.keys(val)]);
+    keys.forEach(k => {
+      if (stableStringify(prev[k]) === stableStringify(val[k])) return;
+      if (k === "stock" && inc && typeof val.stock === "number" && typeof prev.stock === "number"){
+        out[path + "/stock"] = inc(val.stock - prev.stock);
+      } else {
+        out[path + "/" + k] = val[k] === undefined ? null : val[k];
+      }
+    });
+  });
+  return out;
 }
 
 function scheduleFirebaseSync(){
@@ -463,8 +544,9 @@ function pushStateToFirebase(){
     const cm = diffCollectionUpdates("cashMovements", state.cashMovements, lastSyncSnapshot.cashMovements);
     const cc = diffCollectionUpdates("cashClosures", state.cashClosures, lastSyncSnapshot.cashClosures);
     const metaObj = buildMetaObject();
-    const metaChanged = JSON.stringify(metaObj) !== JSON.stringify(lastSyncSnapshot.meta);
-    const updates = Object.assign({}, p.updates, s.updates, ps.updates, cm.updates, cc.updates);
+    const metaChanged = stableStringify(metaObj) !== stableStringify(lastSyncSnapshot.meta);
+    const productUpdates = toFieldLevelProductUpdates(p.updates, lastSyncSnapshot.products);
+    const updates = Object.assign({}, productUpdates, s.updates, ps.updates, cm.updates, cc.updates);
     if (metaChanged) updates["meta"] = encodeMetaForFirebase(metaObj);
     if (Object.keys(updates).length === 0) return;
     fbRootRef.update(updates).then(() => {
@@ -476,8 +558,17 @@ function pushStateToFirebase(){
       // "cat.name = ...") ensuciaría el "confirmado" sin pasar por
       // Firebase. Por eso se clona antes de guardarlo como lastSyncSnapshot.
       lastSyncSnapshot = { products: p.currentMap, sales: s.currentMap, pendingSales: ps.currentMap, cashMovements: cm.currentMap, cashClosures: cc.currentMap, meta: deepClone(metaObj) };
+      normalizeSnapshotDefaults();
       persistSyncState();
       setFbStatus("ok");
+      // Como el stock se suma en el servidor, el total real puede diferir de lo
+      // que este dispositivo calculó: se lee de vuelta para mostrar el correcto.
+      if (typeof fbRootRef.once === "function"){
+        fbRootRef.once("value").then(snap => {
+          const rv = snap.val();
+          if (rv && applyRemoteSnapshot(rv)) refreshVisibleView();
+        }).catch(() => {});
+      }
     }).catch(err => {
       console.error("No se pudo sincronizar con Firebase (revisa las reglas de la base de datos en Firebase Console):", err);
       setFbStatus("error");
@@ -581,7 +672,7 @@ function mergeCollectionWithRemote(localArr, remoteObj, lastSyncedMap){
     const remoteVal = (remoteMap[id] !== undefined && remoteMap[id] !== null) ? remoteMap[id] : undefined;
     const hasRemote = remoteVal !== undefined;
 
-    const localPending = JSON.stringify(hasLocal ? localVal : null) !== JSON.stringify(hasLastSynced ? lastVal : null);
+    const localPending = stableStringify(hasLocal ? localVal : null) !== stableStringify(hasLastSynced ? lastVal : null);
 
     if (localPending){
       if (hasLocal) merged[id] = localVal;
@@ -642,7 +733,7 @@ function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
     // igual aquí: así una clave que todavía no se confirmó por Firebase no
     // se considera "pendiente" solo por esa diferencia de tipo.
     const norm = (v) => (v === undefined ? null : v);
-    const pending = JSON.stringify(norm(curVal)) !== JSON.stringify(norm(lastVal));
+    const pending = stableStringify(norm(curVal)) !== stableStringify(norm(lastVal));
     if (pending){
       merged[key] = curVal; // cambio propio (p.ej. un cierre de caja) sin subir todavía: se respeta
     } else if (remVal !== undefined){
@@ -706,7 +797,6 @@ function adoptRemoteDirectly(remote){
     state.businessName = decodedMeta.businessName;
     state.categories = decodedMeta.categories ? deepClone(decodedMeta.categories) : state.categories;
     state.gridSizes = (decodedMeta.gridSizes && decodedMeta.gridSizes.length) ? deepClone(decodedMeta.gridSizes) : state.gridSizes;
-    state.selectedGridSizeIndex = (decodedMeta.selectedGridSizeIndex !== undefined && decodedMeta.selectedGridSizeIndex !== null) ? decodedMeta.selectedGridSizeIndex : state.selectedGridSizeIndex;
     state.cashRegister = decodedMeta.cashRegister !== undefined ? deepClone(decodedMeta.cashRegister) : state.cashRegister;
     state.stockEnabled = decodedMeta.stockEnabled !== undefined ? decodedMeta.stockEnabled : state.stockEnabled;
     state.theme = decodedMeta.theme ? deepClone(decodedMeta.theme) : state.theme;
@@ -741,11 +831,10 @@ function applyRemoteSnapshot(remote){
   if (remote.meta){
     const decodedRemoteMeta = decodeMetaFromFirebase(remote.meta);
     const { mergedMeta, confirmedMeta } = mergeMetaWithRemote(decodedRemoteMeta, lastSyncSnapshot.meta);
-    if (JSON.stringify(mergedMeta) !== JSON.stringify(buildMetaObject())){
+    if (stableStringify(mergedMeta) !== stableStringify(buildMetaObject())){
       state.businessName = mergedMeta.businessName;
       state.categories = mergedMeta.categories || state.categories;
       state.gridSizes = (mergedMeta.gridSizes && mergedMeta.gridSizes.length) ? mergedMeta.gridSizes : state.gridSizes;
-      state.selectedGridSizeIndex = (mergedMeta.selectedGridSizeIndex !== undefined && mergedMeta.selectedGridSizeIndex !== null) ? mergedMeta.selectedGridSizeIndex : state.selectedGridSizeIndex;
       state.cashRegister = mergedMeta.cashRegister !== undefined ? mergedMeta.cashRegister : state.cashRegister;
       state.stockEnabled = mergedMeta.stockEnabled !== undefined ? mergedMeta.stockEnabled : state.stockEnabled;
       state.theme = mergedMeta.theme || state.theme;
@@ -780,7 +869,12 @@ function applyRemoteSnapshot(remote){
     // sabe distinguir una eliminación remota de un cambio local pendiente)
     // decida registro por registro, en vez de saltarse toda la colección.
     const { mergedArr, confirmedMap } = mergeCollectionWithRemote(state[stateKey], remote[remoteKey] || {}, lastSyncSnapshot[stateKey]);
-    if (JSON.stringify(mergedArr) !== JSON.stringify(state[stateKey])){
+    // Se completan los campos faltantes ANTES de comparar, para que un
+    // producto que Firebase guarda sin ellos no parezca "distinto" en cada
+    // actualización (ver normalizeProductDefaults).
+    if (stateKey === "products") mergedArr.forEach((p, i) => normalizeProductDefaults(p, i));
+    if (stateKey === "sales") mergedArr.forEach(s => { if (!s.delivery && s.items) s.delivery = { units: generateDeliveryUnits(s.items, true), finalized: true }; });
+    if (stableStringify(sortedById(mergedArr)) !== stableStringify(sortedById(state[stateKey]))){
       state[stateKey] = mergedArr;
       changed = true;
     }
@@ -790,6 +884,7 @@ function applyRemoteSnapshot(remote){
   if (changed){
     applyDefaultsAndMigrations();
   }
+  normalizeSnapshotDefaults();
   persistSyncState();
   return changed;
 }
