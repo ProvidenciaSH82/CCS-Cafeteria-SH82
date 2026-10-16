@@ -123,6 +123,8 @@ function setFbStatus(status){
 let state = {
   businessName: "POS Shalom",
   categories: [],   // { id, name, bgColor?, textColor? }  (el orden del arreglo = orden de visualización)
+  devices: [],      // { id, name, firstSeen, lastSeen, info }  dispositivos que han entrado (nombre puesto por el dueño)
+  deviceNamesEnabled: false, // si es true, el historial muestra "Vendedor: nombre"
   subcategories: [],// { id, name, categoryId, bgColor?, textColor? }  (orden del arreglo = orden dentro de su categoría)
   products: [],     // { id, name, price, cost, categoryId, hidden, stock, stockMin, stockTracked }
   sales: [],        // { id, jornadaNumber, date, name, items:[...], subtotal, discount, total, method, cash, qr, delivery:{...}, deleted }
@@ -261,12 +263,16 @@ function normalizeSnapshotDefaults(){
   if (lastSyncSnapshot.meta){
     delete lastSyncSnapshot.meta.selectedGridSizeIndex;
     if (!lastSyncSnapshot.meta.subcategories) lastSyncSnapshot.meta.subcategories = [];
+    if (!lastSyncSnapshot.meta.devices) lastSyncSnapshot.meta.devices = [];
+    if (lastSyncSnapshot.meta.deviceNamesEnabled === undefined) lastSyncSnapshot.meta.deviceNamesEnabled = false;
   }
 }
 
 function applyDefaultsAndMigrations(){
   if (!state.pendingSales) state.pendingSales = [];
   if (!Array.isArray(state.subcategories)) state.subcategories = [];
+  if (!Array.isArray(state.devices)) state.devices = [];
+  if (state.deviceNamesEnabled === undefined) state.deviceNamesEnabled = false;
   // Subcategorías huérfanas (su categoría ya no existe) no se muestran en ningún lado.
   state.subcategories = state.subcategories.filter(sc => state.categories.some(c => c.id === sc.categoryId));
   if (!state.gridSizes || state.gridSizes.length === 0) state.gridSizes = defaultGridSizes();
@@ -405,6 +411,8 @@ function buildMetaObject(){
     businessName: state.businessName,
     categories: state.categories,
     subcategories: state.subcategories || [],
+    devices: state.devices || [],
+    deviceNamesEnabled: !!state.deviceNamesEnabled,
     gridSizes: state.gridSizes,
     cashRegister: state.cashRegister,
     stockEnabled: state.stockEnabled,
@@ -435,7 +443,7 @@ function encodeMetaForFirebase(metaObj){
   Object.keys(out).forEach(key => {
     if (out[key] === null) out[key] = FB_NULL_MARKER;
   });
-  ["categories", "subcategories"].forEach(k => {
+  ["categories", "subcategories", "devices"].forEach(k => {
     if (Array.isArray(out[k]) && out[k].length === 0) out[k] = FB_EMPTY_ARRAY_MARKER;
   });
   return out;
@@ -446,7 +454,7 @@ function decodeMetaFromFirebase(remoteMeta){
   Object.keys(out).forEach(key => {
     if (out[key] === FB_NULL_MARKER) out[key] = null;
   });
-  ["categories", "subcategories"].forEach(k => {
+  ["categories", "subcategories", "devices"].forEach(k => {
     if (out[k] === FB_EMPTY_ARRAY_MARKER) out[k] = [];
     // Firebase puede devolver arreglos como objetos si faltan índices.
     else if (out[k] && typeof out[k] === "object" && !Array.isArray(out[k])) out[k] = Object.values(out[k]);
@@ -819,7 +827,7 @@ function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
     // se considera "pendiente" solo por esa diferencia de tipo.
     const norm = (v) => (v === undefined ? null : v);
     const pending = stableStringify(norm(curVal)) !== stableStringify(norm(lastVal));
-    if (pending && (key === "categories" || key === "subcategories") && Array.isArray(remVal) && Array.isArray(curVal)){
+    if (pending && (key === "categories" || key === "subcategories" || key === "devices") && Array.isArray(remVal) && Array.isArray(curVal)){
       merged[key] = mergeIdLists(curVal, lastVal, remVal);
     } else if (pending){
       merged[key] = curVal; // cambio propio (p.ej. un cierre de caja) sin subir todavía: se respeta
@@ -884,6 +892,8 @@ function adoptRemoteDirectly(remote){
     state.businessName = decodedMeta.businessName;
     state.categories = decodedMeta.categories ? deepClone(decodedMeta.categories) : state.categories;
     state.subcategories = decodedMeta.subcategories ? deepClone(decodedMeta.subcategories) : (state.subcategories || []);
+    state.devices = decodedMeta.devices ? deepClone(decodedMeta.devices) : (state.devices || []);
+    state.deviceNamesEnabled = decodedMeta.deviceNamesEnabled !== undefined ? !!decodedMeta.deviceNamesEnabled : !!state.deviceNamesEnabled;
     state.gridSizes = (decodedMeta.gridSizes && decodedMeta.gridSizes.length) ? deepClone(decodedMeta.gridSizes) : state.gridSizes;
     state.cashRegister = decodedMeta.cashRegister !== undefined ? deepClone(decodedMeta.cashRegister) : state.cashRegister;
     state.stockEnabled = decodedMeta.stockEnabled !== undefined ? decodedMeta.stockEnabled : state.stockEnabled;
@@ -923,6 +933,8 @@ function applyRemoteSnapshot(remote){
       state.businessName = mergedMeta.businessName;
       state.categories = mergedMeta.categories || state.categories;
       state.subcategories = mergedMeta.subcategories || state.subcategories || [];
+      state.devices = mergedMeta.devices || state.devices || [];
+      state.deviceNamesEnabled = mergedMeta.deviceNamesEnabled !== undefined ? !!mergedMeta.deviceNamesEnabled : !!state.deviceNamesEnabled;
       state.gridSizes = (mergedMeta.gridSizes && mergedMeta.gridSizes.length) ? mergedMeta.gridSizes : state.gridSizes;
       state.cashRegister = mergedMeta.cashRegister !== undefined ? mergedMeta.cashRegister : state.cashRegister;
       state.stockEnabled = mergedMeta.stockEnabled !== undefined ? mergedMeta.stockEnabled : state.stockEnabled;
@@ -1281,6 +1293,14 @@ function getCurrentJornadaSales(){
   if (!state.cashRegister) return [];
   const openedTime = new Date(state.cashRegister.openedAt).getTime();
   return state.sales.filter(s => !s.deleted && new Date(s.date).getTime() >= openedTime);
+}
+
+// Igual que la anterior pero INCLUYENDO las anuladas: solo para mostrarlas en
+// el Historial de ventas (nunca para totales, resumen ni caja).
+function getCurrentJornadaSalesWithVoided(){
+  if (!state.cashRegister) return [];
+  const openedTime = new Date(state.cashRegister.openedAt).getTime();
+  return state.sales.filter(s => new Date(s.date).getTime() >= openedTime);
 }
 
 // Entradas/salidas de dinero de la jornada actualmente abierta (no son ventas:
@@ -2797,6 +2817,7 @@ async function finalizeSaleInner(name, method, cash, qr){
       items: itemsSnapshot,
       subtotal, discount, total,
       method, cash, qr,
+      deviceId: getDeviceId(),
       delivery: { units: generateDeliveryUnits(itemsSnapshot, false), finalized: false }
     };
     state.sales.push(sale);
@@ -2814,6 +2835,108 @@ function resetCartAfterSale(){
   renderCategories();
 }
 
+// ---------- IDENTIFICADOR DE DISPOSITIVOS ----------
+// Cada navegador/dispositivo recibe un código único que se guarda SOLO en ese
+// navegador (no se sincroniza). El dueño le pone un nombre en Configuración
+// general; las ventas guardan el código y el historial muestra el nombre.
+let deviceIdMemory = null;
+function getDeviceId(){
+  try {
+    let id = localStorage.getItem("posShalomDeviceId");
+    if (!id){
+      id = "dev_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+      localStorage.setItem("posShalomDeviceId", id);
+    }
+    return id;
+  } catch (e){
+    if (!deviceIdMemory) deviceIdMemory = "dev_" + Math.random().toString(36).slice(2, 10);
+    return deviceIdMemory;
+  }
+}
+function describeThisDevice(){
+  const ua = navigator.userAgent || "";
+  const os = /Android/i.test(ua) ? "Android" : /iPhone|iPad|iPod/i.test(ua) ? "iPhone/iPad" : /Windows/i.test(ua) ? "Windows" : /Mac OS X/i.test(ua) ? "Mac" : /Linux/i.test(ua) ? "Linux" : "Dispositivo";
+  const br = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Navegador";
+  return os + " · " + br;
+}
+// Registra este dispositivo en la lista compartida (o actualiza su última conexión, como máximo cada hora).
+function registerThisDevice(){
+  if (!Array.isArray(state.devices)) state.devices = [];
+  const id = getDeviceId();
+  const now = new Date().toISOString();
+  const mine = state.devices.find(d => d.id === id);
+  if (!mine){
+    state.devices.push({ id, name: "", firstSeen: now, lastSeen: now, info: describeThisDevice() });
+    saveState();
+  } else if (Date.now() - new Date(mine.lastSeen || 0).getTime() > 3600 * 1000){
+    mine.lastSeen = now;
+    mine.info = describeThisDevice();
+    saveState();
+  }
+}
+function runDeviceRegistrationIfSafe(){
+  if (fbStatus !== "ok" || !SYNC_CHILDREN.every(k => remoteReceived[k])) return;
+  registerThisDevice();
+}
+// Texto " - Vendedor: nombre" (vacío si la función está desactivada o el dispositivo no tiene nombre).
+function sellerLabel(sale){
+  if (!state.deviceNamesEnabled || !sale || !sale.deviceId) return "";
+  const dev = (state.devices || []).find(d => d.id === sale.deviceId);
+  if (!dev || !dev.name) return "";
+  return ` - <strong>Vendedor: ${escapeHtml(dev.name)}</strong>`;
+}
+
+function renderDevicesBlock(){
+  const on = document.getElementById("devNamesOn");
+  if (!on) return;
+  on.classList.toggle("selected", !!state.deviceNamesEnabled);
+  document.getElementById("devNamesOff").classList.toggle("selected", !state.deviceNamesEnabled);
+  const wrap = document.getElementById("devList");
+  wrap.innerHTML = "";
+  const myId = getDeviceId();
+  const list = (state.devices || []).slice().sort((a, b) => (a.id === myId ? -1 : b.id === myId ? 1 : new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0)));
+  if (list.length === 0){
+    wrap.innerHTML = `<p class="muted" style="font-size:.85rem;">Todavía no hay dispositivos registrados.</p>`;
+    return;
+  }
+  list.forEach(dev => {
+    const row = document.createElement("div");
+    row.className = "device-row";
+    const last = dev.lastSeen ? new Date(dev.lastSeen) : null;
+    row.innerHTML = `
+      <div class="device-info">
+        <strong>${escapeHtml(dev.info || "Dispositivo")}</strong>${dev.id === myId ? ' <span class="tag">Este dispositivo</span>' : ""}
+        <div class="muted" style="font-size:.78rem;">Código: ${escapeHtml(dev.id.slice(-6))}${last ? " · Última conexión: " + last.toLocaleDateString() + " " + last.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : ""}</div>
+      </div>
+      <input type="text" class="device-name" placeholder="Nombre (ej: Sebastián)" value="${escapeHtml(dev.name || "")}" data-dev="${escapeHtml(dev.id)}">
+      <button class="mini-btn" data-save-dev="${escapeHtml(dev.id)}">Guardar</button>
+      ${dev.id === myId ? "" : `<button class="mini-btn danger" data-del-dev="${escapeHtml(dev.id)}">Quitar</button>`}
+    `;
+    wrap.appendChild(row);
+  });
+  wrap.querySelectorAll("[data-save-dev]").forEach(b => b.addEventListener("click", () => {
+    const id = b.dataset.saveDev;
+    const dev = state.devices.find(d => d.id === id);
+    const input = wrap.querySelector(`input[data-dev="${id}"]`);
+    if (!dev || !input) return;
+    dev.name = input.value.trim();
+    saveState();
+    showToast("Nombre guardado.");
+  }));
+  wrap.querySelectorAll("[data-del-dev]").forEach(b => b.addEventListener("click", () => {
+    openConfirmModal("Quitar dispositivo", "¿Quitar este dispositivo de la lista? Si vuelve a entrar, aparecerá otra vez sin nombre.", () => {
+      state.devices = state.devices.filter(d => d.id !== b.dataset.delDev);
+      saveState();
+      renderDevicesBlock();
+    }, true, {}, true);
+  }));
+}
+function setDeviceNamesEnabled(v){
+  state.deviceNamesEnabled = !!v;
+  saveState();
+  renderDevicesBlock();
+}
+
 // ---------- HISTORIAL DE VENTAS ----------
 // Muestra solo las ventas de la jornada de caja actualmente abierta: al cerrar
 // caja, esa jornada queda guardada dentro del cierre correspondiente, y una
@@ -2821,7 +2944,7 @@ function resetCartAfterSale(){
 function renderHistory(){
   const list = document.getElementById("historyList");
   list.innerHTML = "";
-  const sales = getCurrentJornadaSales();
+  const sales = getCurrentJornadaSalesWithVoided();
   if (sales.length === 0){
     list.innerHTML = `<p class="empty-msg">${state.cashRegister ? "Todavía no hay ventas registradas en esta jornada." : "No hay una caja abierta. Abre caja para comenzar a vender."}</p>`;
     return;
@@ -2829,17 +2952,17 @@ function renderHistory(){
   [...sales].sort((a,b) => new Date(b.date) - new Date(a.date)).forEach(sale => {
     const d = new Date(sale.date);
     const row = document.createElement("div");
-    row.className = "history-row";
+    row.className = "history-row" + (sale.deleted ? " voided" : "");
     row.innerHTML = `
       <span class="hnum">#${String(sale.jornadaNumber).padStart(3,'0')}</span>
       <span class="hmeta">
-        ${sale.name ? `<strong>${sale.name}</strong> · ` : ""}${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · <span class="tag">${sale.method}</span>
+        ${sale.deleted ? `<span class="tag voided-tag">ANULADA</span> ` : ""}${sale.name ? `<strong>${sale.name}</strong> · ` : ""}${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · <span class="tag">${sale.method}</span>${sellerLabel(sale)}
       </span>
       <span class="htotal">Bs ${sale.total.toFixed(2)}</span>
       <div class="hactions">
         <button class="mini-btn" data-view-sale="${sale.id}">Ver</button>
-        <button class="mini-btn" data-edit-sale="${sale.id}">Editar pedido</button>
-        <button class="mini-btn danger" data-delete-sale="${sale.id}">Eliminar</button>
+        ${sale.deleted ? "" : `<button class="mini-btn" data-edit-sale="${sale.id}">Editar pedido</button>
+        <button class="mini-btn danger" data-delete-sale="${sale.id}">Anular</button>`}
       </div>
     `;
     list.appendChild(row);
@@ -2865,9 +2988,9 @@ function viewSale(saleId){
     `;
   }).join("");
   showModal(`
-    <h2>Venta #${String(sale.jornadaNumber).padStart(3,'0')}</h2>
+    <h2>Venta #${String(sale.jornadaNumber).padStart(3,'0')}${sale.deleted ? ' <span class="tag voided-tag">ANULADA</span>' : ''}</h2>
     ${sale.name ? `<p style="font-weight:700; margin-bottom:4px;">${sale.name}</p>` : ""}
-    <p class="muted" style="margin-bottom:10px;">${d.toLocaleDateString()} — ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</p>
+    <p class="muted" style="margin-bottom:10px;">${d.toLocaleDateString()} — ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}${sellerLabel(sale)}</p>
     ${itemsHtml}
     <div class="cart-summary" style="margin-top:10px;">
       <div class="sum-row"><span>Subtotal</span><span>Bs ${sale.subtotal.toFixed(2)}</span></div>
@@ -2887,7 +3010,7 @@ function viewSale(saleId){
 function deleteSale(saleId){
   const sale = state.sales.find(s => s.id === saleId);
   if (!sale) return;
-  openConfirmModal("Eliminar venta", `¿Seguro que quieres eliminar la venta #${String(sale.jornadaNumber).padStart(3,'0')}? Esta acción no se puede deshacer.`, () => {
+  openConfirmModal("Anular venta", `¿Seguro que quieres anular la venta #${String(sale.jornadaNumber).padStart(3,'0')}? Se devolverá el stock, se descontará de la caja y quedará en el historial marcada como anulada. Esta acción no se puede deshacer.`, () => {
     requireDeletePassword(() => {
       if (state.stockEnabled){
         sale.items.forEach(i => {
@@ -4319,7 +4442,10 @@ function renderConfigGeneral(){
   document.getElementById("cfgAccentColor").value = t.accentColor || "#f2a649";
   document.getElementById("cfgTextColor").value = t.textColor || "#f1efe9";
   document.getElementById("cfgLogoScale").value = t.logoScale || 1;
+  renderDevicesBlock();
 }
+document.getElementById("devNamesOn").addEventListener("click", () => setDeviceNamesEnabled(true));
+document.getElementById("devNamesOff").addEventListener("click", () => setDeviceNamesEnabled(false));
 
 document.getElementById("btnSaveLogoScale").addEventListener("click", () => {
   const raw = document.getElementById("cfgLogoScale").value.trim();
@@ -4542,9 +4668,11 @@ function renderCocina(){
 // (es el mismo dato guardado, no dos sistemas separados). Navega primero por
 // categorías y luego muestra los productos de la seleccionada.
 let currentVisCategoryId = null;
+let currentVisSubId = undefined; // undefined = no se eligió subcategoría; "" = productos sin subcategoría
 
 function renderVisibilityScreen(){
   currentVisCategoryId = null;
+  currentVisSubId = undefined;
   document.getElementById("visTitle").textContent = "Ocultar / Visualizar";
   document.getElementById("btnBackToVisCats").classList.add("hidden");
   document.getElementById("visProductList").classList.add("hidden");
@@ -4563,7 +4691,8 @@ function renderVisCategoryGrid(){
     const count = state.products.filter(p => p.categoryId === cat.id).length;
     const btn = document.createElement("button");
     btn.className = "pick-card";
-    btn.innerHTML = `<span class="name">${cat.name}</span><span class="price">${count} producto${count===1?"":"s"}</span>`;
+    btn.innerHTML = `<span class="name">${escapeHtml(cat.name)}</span><span class="price">${count} producto${count===1?"":"s"}</span>`;
+    applyItemColors(btn, cat);
     btn.addEventListener("click", () => openVisCategory(cat.id));
     wrap.appendChild(btn);
   });
@@ -4571,20 +4700,55 @@ function renderVisCategoryGrid(){
 
 function openVisCategory(catId){
   currentVisCategoryId = catId;
+  currentVisSubId = undefined;
   const cat = state.categories.find(c => c.id === catId);
   document.getElementById("visTitle").textContent = cat.name;
   document.getElementById("btnBackToVisCats").classList.remove("hidden");
+  if (subcategoriesOf(catId).length > 0){
+    // Con subcategorías: primero se elige la subcategoría, luego se ven los productos.
+    document.getElementById("visProductList").classList.add("hidden");
+    document.getElementById("visCategoryGrid").classList.remove("hidden");
+    renderVisSubGrid(catId);
+    return;
+  }
   document.getElementById("visCategoryGrid").classList.add("hidden");
   document.getElementById("visProductList").classList.remove("hidden");
   renderVisProductList(catId);
 }
 
-function renderVisProductList(catId){
+function renderVisSubGrid(catId){
+  const wrap = document.getElementById("visCategoryGrid");
+  wrap.innerHTML = "";
+  const cards = subcategoriesOf(catId).map(sc => ({ id: sc.id, name: sc.name, item: sc, count: productsInGroup(catId, sc.id).length }));
+  const loose = productsInGroup(catId, "").length;
+  if (loose > 0) cards.push({ id: "", name: "Sin subcategoría", item: null, count: loose });
+  cards.forEach(c => {
+    const btn = document.createElement("button");
+    btn.className = "pick-card";
+    btn.innerHTML = `<span class="name">${escapeHtml(c.name)}</span><span class="price">${c.count} producto${c.count===1?"":"s"}</span>`;
+    applyItemColors(btn, c.item);
+    btn.addEventListener("click", () => openVisSub(catId, c.id));
+    wrap.appendChild(btn);
+  });
+}
+
+function openVisSub(catId, subId){
+  currentVisCategoryId = catId;
+  currentVisSubId = subId;
+  const cat = state.categories.find(c => c.id === catId);
+  const sc = subId ? state.subcategories.find(x => x.id === subId) : null;
+  document.getElementById("visTitle").textContent = `${cat.name} › ${sc ? sc.name : "Sin subcategoría"}`;
+  document.getElementById("visCategoryGrid").classList.add("hidden");
+  document.getElementById("visProductList").classList.remove("hidden");
+  renderVisProductList(catId, subId);
+}
+
+function renderVisProductList(catId, subId){
   const wrap = document.getElementById("visProductList");
   wrap.innerHTML = "";
-  const prods = productsInCategory(catId);
+  const prods = subId === undefined ? productsInCategory(catId) : productsInGroup(catId, subId);
   if (prods.length === 0){
-    wrap.innerHTML = `<p class="empty-msg">Sin productos en esta categoría.</p>`;
+    wrap.innerHTML = `<p class="empty-msg">Sin productos aquí.</p>`;
     return;
   }
   prods.forEach(p => {
@@ -4592,19 +4756,23 @@ function renderVisProductList(catId){
     btn.className = "visibility-row" + (p.hidden ? " is-hidden" : "");
     // El stock solo se muestra si ese producto tiene su control de stock activado.
     btn.innerHTML = `
-      <span class="visibility-name">${p.name}${subcategoryName(p) ? " [" + subcategoryName(p) + "]" : ""} — Bs ${p.price.toFixed(2)}${p.stockTracked ? " · Stock: " + p.stock : ""}</span>
+      <span class="visibility-name">${p.name} — Bs ${p.price.toFixed(2)}${p.stockTracked ? " · Stock: " + p.stock : ""}</span>
       ${p.hidden ? '<span class="tag danger">OCULTADO</span>' : '<span class="mini-btn">Ocultar</span>'}
     `;
     btn.addEventListener("click", () => {
       p.hidden = !p.hidden;
       saveState();
-      renderVisProductList(catId);
+      renderVisProductList(catId, subId);
     });
     wrap.appendChild(btn);
   });
 }
 
-document.getElementById("btnBackToVisCats").addEventListener("click", renderVisibilityScreen);
+document.getElementById("btnBackToVisCats").addEventListener("click", () => {
+  // Desde los productos de una subcategoría se vuelve a las subcategorías.
+  if (currentVisCategoryId && currentVisSubId !== undefined) openVisCategory(currentVisCategoryId);
+  else renderVisibilityScreen();
+});
 
 // ---------- DETALLE DE ENTREGA ----------
 function openDeliveryDetail(saleId){
@@ -4815,6 +4983,7 @@ async function startApp(){
     attachFirebaseListener(); // (ya enganchado arriba; no hace nada si ya existe)
     if (fbStatus === "ok") setTimeout(archiveOldJornadaData, 1500);
     setTimeout(runOrphanRepairIfSafe, 3000);
+    setTimeout(runDeviceRegistrationIfSafe, 3500);
   } else {
     appStarted = true;
     setFbStatus("error");

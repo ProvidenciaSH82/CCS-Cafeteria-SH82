@@ -6,7 +6,7 @@
 <title>POS Shalom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=202610160100">
+<link rel="stylesheet" href="style.css?v=202610160300">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
@@ -289,6 +289,16 @@
             <button class="btn-ghost" id="btnResetTheme" style="width:fit-content;">Restablecer por defecto</button>
           </div>
         </div>
+
+        <div class="settings-block" style="margin-top:26px; max-width:620px;">
+          <label>Identificador de dispositivos</label>
+          <p class="muted" style="font-size:.8rem; margin-top:4px;">Ponle un nombre a cada dispositivo que entra al sistema. Si lo activas, el Historial de ventas muestra "Vendedor: nombre" en cada venta. Si lo desactivas, no se muestra nada.</p>
+          <div class="toggle-pair" style="max-width:300px;">
+            <button type="button" id="devNamesOn">Activado</button>
+            <button type="button" id="devNamesOff">Desactivado</button>
+          </div>
+          <div id="devList" style="margin-top:14px;"></div>
+        </div>
       </section>
 
       <!-- ========================================================= -->
@@ -363,6 +373,6 @@
 
   <div class="toast" id="posToast"></div>
 
-  <script src="app.js?v=202610160100"></script>
+  <script src="app.js?v=202610160300"></script>
 </body>
 </html>

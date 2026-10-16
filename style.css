@@ -487,3 +487,14 @@ input{font-family:inherit;}
 .color-preview-wrap{margin-top:12px; display:flex; flex-direction:column; gap:4px;}
 .color-preview{padding:14px; border-radius:var(--radius); border:2px solid var(--border); background:var(--panel); font-weight:700; text-align:center; word-break:break-word;}
 .color-warn{margin-top:8px; color:var(--danger); font-size:.82rem; font-weight:700;}
+
+/* Ventas anuladas en el historial */
+.history-row.voided{background:#e57373; color:#000; border-color:#b71c1c;}
+.history-row.voided .hnum, .history-row.voided .hmeta, .history-row.voided .htotal, .history-row.voided strong{color:#000;}
+.history-row.voided .htotal{text-decoration:line-through;}
+.voided-tag{background:#b71c1c; color:#fff; font-weight:800; letter-spacing:.04em;}
+
+/* Identificador de dispositivos */
+.device-row{display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:10px; margin-bottom:8px; border:1px solid var(--border); border-radius:var(--radius); background:var(--panel);}
+.device-row .device-info{flex:1 1 100%;}
+.device-row .device-name{flex:1 1 160px; min-width:0;}
