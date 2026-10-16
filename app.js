@@ -435,7 +435,9 @@ function encodeMetaForFirebase(metaObj){
   Object.keys(out).forEach(key => {
     if (out[key] === null) out[key] = FB_NULL_MARKER;
   });
-  if (Array.isArray(out.subcategories) && out.subcategories.length === 0) out.subcategories = FB_EMPTY_ARRAY_MARKER;
+  ["categories", "subcategories"].forEach(k => {
+    if (Array.isArray(out[k]) && out[k].length === 0) out[k] = FB_EMPTY_ARRAY_MARKER;
+  });
   return out;
 }
 function decodeMetaFromFirebase(remoteMeta){
@@ -444,9 +446,11 @@ function decodeMetaFromFirebase(remoteMeta){
   Object.keys(out).forEach(key => {
     if (out[key] === FB_NULL_MARKER) out[key] = null;
   });
-  if (out.subcategories === FB_EMPTY_ARRAY_MARKER) out.subcategories = [];
-  // Firebase puede devolver arreglos como objetos si faltan índices.
-  if (out.subcategories && !Array.isArray(out.subcategories)) out.subcategories = Object.values(out.subcategories);
+  ["categories", "subcategories"].forEach(k => {
+    if (out[k] === FB_EMPTY_ARRAY_MARKER) out[k] = [];
+    // Firebase puede devolver arreglos como objetos si faltan índices.
+    else if (out[k] && typeof out[k] === "object" && !Array.isArray(out[k])) out[k] = Object.values(out[k]);
+  });
   // La cuadrícula elegida es individual de cada dispositivo (cada uno la
   // acomoda a su pantalla): se ignora aunque haya quedado guardada en la nube.
   delete out.selectedGridSizeIndex;
@@ -584,7 +588,22 @@ function pushStateToFirebase(){
     const metaChanged = stableStringify(metaObj) !== stableStringify(lastSyncSnapshot.meta);
     const productUpdates = toFieldLevelProductUpdates(p.updates, lastSyncSnapshot.products);
     const updates = Object.assign({}, productUpdates, s.updates, ps.updates, cm.updates, cc.updates);
-    if (metaChanged) updates["meta"] = encodeMetaForFirebase(metaObj);
+    if (metaChanged){
+      // Se escribe SOLO lo que cambió dentro de "meta" (p.ej. "meta/categories")
+      // en vez de reemplazar todo el bloque: Firebase manda a los demás
+      // dispositivos únicamente lo escrito, así cambiar una categoría ya no
+      // vuelve a descargar el logo y el resto de la configuración.
+      const encoded = encodeMetaForFirebase(metaObj);
+      const lastMeta = lastSyncSnapshot.meta;
+      if (!lastMeta){
+        updates["meta"] = encoded;
+      } else {
+        const norm = (v) => (v === undefined ? null : v);
+        Object.keys(metaObj).forEach(k => {
+          if (stableStringify(norm(metaObj[k])) !== stableStringify(norm(lastMeta[k]))) updates["meta/" + k] = encoded[k] === undefined ? FB_NULL_MARKER : encoded[k];
+        });
+      }
+    }
     if (Object.keys(updates).length === 0) return;
     fbRootRef.update(updates).then(() => {
       // "meta" (categorías, tema, etc.) tiene arreglos/objetos anidados que
@@ -751,6 +770,36 @@ function mergeCollectionWithRemote(localArr, remoteObj, lastSyncedMap){
 // es lo que corrige que un cierre de caja hecho en un dispositivo pudiera
 // ser "revivido" por una foto de otro dispositivo que todavía no se había
 // enterado del cierre.
+// Fusión de listas de categorías/subcategorías ELEMENTO POR ELEMENTO (por id).
+// Bug real que esto corrige: si dos dispositivos agregaban una categoría casi
+// al mismo tiempo, la lista completa de uno pisaba la del otro y una categoría
+// desaparecía, dejando sus productos "sin categoría" (huérfanos).
+function mergeIdLists(curList, lastList, remList){
+  const cur = curList || [], last = lastList || [], rem = remList || [];
+  const byId = (arr) => { const m = {}; arr.forEach(x => { m[x.id] = x; }); return m; };
+  const mc = byId(cur), ml = byId(last), mr = byId(rem);
+  const out = [];
+  const seen = new Set();
+  rem.forEach(r => {
+    const id = r.id;
+    seen.add(id);
+    if (ml[id] && !mc[id]) return;                 // la borré yo aquí: sigue borrada
+    if (mc[id] && stableStringify(mc[id]) !== stableStringify(ml[id])) out.push(mc[id]); // la edité yo: gana lo mío
+    else out.push(r);
+  });
+  cur.forEach(c => {
+    if (seen.has(c.id)) return;
+    if (ml[c.id]){
+      // Estaba confirmada y ya no está en remoto: otro dispositivo la borró.
+      // Si yo la había modificado, se conserva; si no, queda borrada.
+      if (stableStringify(c) !== stableStringify(ml[c.id])) out.push(c);
+      return;
+    }
+    out.push(c);                                    // agregada por mí, aún sin subir
+  });
+  return out;
+}
+
 function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
   const current = buildMetaObject();
   lastSyncedMeta = lastSyncedMeta || {};
@@ -770,7 +819,9 @@ function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
     // se considera "pendiente" solo por esa diferencia de tipo.
     const norm = (v) => (v === undefined ? null : v);
     const pending = stableStringify(norm(curVal)) !== stableStringify(norm(lastVal));
-    if (pending){
+    if (pending && (key === "categories" || key === "subcategories") && Array.isArray(remVal) && Array.isArray(curVal)){
+      merged[key] = mergeIdLists(curVal, lastVal, remVal);
+    } else if (pending){
       merged[key] = curVal; // cambio propio (p.ej. un cierre de caja) sin subir todavía: se respeta
     } else if (remVal !== undefined){
       merged[key] = remVal;
@@ -1493,6 +1544,42 @@ function computeProductDetail(sales){
 // quitan: si algo falla, no se pierde nada, se reintenta en el próximo cierre
 // o arranque.
 let archiving = false;
+// Productos "sin categoría" (su categoría ya no existe): aparecían en el Excel
+// con la categoría vacía y en "Stock bajo". Si hay otro producto con el mismo
+// nombre que sí tiene categoría, el huérfano es un duplicado y se elimina; si
+// no tiene gemelo, se pasa a una categoría "Sin categoría" (oculto) para que se
+// pueda revisar, editar o eliminar desde Productos. Devuelve cuántos arregló.
+const ORPHAN_CATEGORY_ID = "c_sin_categoria";
+function repairOrphanProducts(){
+  const catIds = new Set(state.categories.map(c => c.id));
+  const orphans = state.products.filter(p => !catIds.has(p.categoryId));
+  if (orphans.length === 0) return 0;
+  const norm = (n) => String(n || "").trim().toLowerCase();
+  const goodNames = new Set(state.products.filter(p => catIds.has(p.categoryId)).map(p => norm(p.name)));
+  const removeIds = new Set();
+  const keep = [];
+  orphans.forEach(p => {
+    if (goodNames.has(norm(p.name))) removeIds.add(p.id); else keep.push(p);
+  });
+  if (removeIds.size) state.products = state.products.filter(p => !removeIds.has(p.id));
+  if (keep.length){
+    if (!state.categories.some(c => c.id === ORPHAN_CATEGORY_ID)){
+      state.categories.push({ id: ORPHAN_CATEGORY_ID, name: "Sin categoría" });
+    }
+    keep.forEach(p => { p.categoryId = ORPHAN_CATEGORY_ID; p.subcategoryId = ""; p.hidden = true; });
+  }
+  saveState();
+  return removeIds.size + keep.length;
+}
+function runOrphanRepairIfSafe(){
+  if (fbStatus !== "ok" || !SYNC_CHILDREN.every(k => remoteReceived[k])) return;
+  const n = repairOrphanProducts();
+  if (n > 0){
+    refreshVisibleView();
+    alert(`Se limpiaron ${n} producto(s) que estaban sin categoría (duplicados o restos antiguos). Si alguno quedó en "Sin categoría", revísalo en Productos.`);
+  }
+}
+
 function archiveOldJornadaData(){
   if (!fbReady || !appStarted || fbStatus !== "ok" || archiving) return;
   const cutoff = state.cashRegister && state.cashRegister.openedAt ? new Date(state.cashRegister.openedAt).getTime() : Infinity;
@@ -4727,6 +4814,7 @@ async function startApp(){
     appStarted = true;
     attachFirebaseListener(); // (ya enganchado arriba; no hace nada si ya existe)
     if (fbStatus === "ok") setTimeout(archiveOldJornadaData, 1500);
+    setTimeout(runOrphanRepairIfSafe, 3000);
   } else {
     appStarted = true;
     setFbStatus("error");
