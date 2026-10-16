@@ -6,7 +6,7 @@
 <title>POS Shalom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=202610090859">
+<link rel="stylesheet" href="style.css?v=202610152100">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
@@ -158,6 +158,7 @@
           <div class="header-actions">
             <button class="btn-primary" id="btnImportExport">Importar / Exportar</button>
             <button class="btn-primary" id="btnAddCategory">Categoría</button>
+            <button class="btn-primary" id="btnAddSubcategory">Subcategoría</button>
             <button class="btn-primary hidden" id="btnGoStock">Stock</button>
             <button class="btn-primary" id="btnAddProduct">+ Producto</button>
           </div>
@@ -168,6 +169,14 @@
       </section>
 
       <!-- ---------- ADMINISTRACIÓN DE CATEGORÍAS (pantalla propia) ---------- -->
+      <section class="view" id="view-subcategories">
+        <header class="view-header row">
+          <button class="btn-back" id="btnBackToProductsFromSub">← Volver a productos</button>
+          <h1>Subcategorías</h1>
+        </header>
+        <button class="btn-primary" id="btnAddSubcategoryScreen" style="margin-bottom:16px;">+ Agregar subcategoría</button>
+        <div id="subcategoryAdminList"></div>
+      </section>
       <section class="view" id="view-categories">
         <header class="view-header row">
           <button class="btn-back" id="btnBackToProducts">← Volver a productos</button>
@@ -354,6 +363,6 @@
 
   <div class="toast" id="posToast"></div>
 
-  <script src="app.js?v=202610090859"></script>
+  <script src="app.js?v=202610152100"></script>
 </body>
 </html>

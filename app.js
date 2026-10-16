@@ -122,7 +122,8 @@ function setFbStatus(status){
 // ---------- ESTADO GLOBAL ----------
 let state = {
   businessName: "POS Shalom",
-  categories: [],   // { id, name }  (el orden del arreglo = orden de visualización)
+  categories: [],   // { id, name, bgColor?, textColor? }  (el orden del arreglo = orden de visualización)
+  subcategories: [],// { id, name, categoryId, bgColor?, textColor? }  (orden del arreglo = orden dentro de su categoría)
   products: [],     // { id, name, price, cost, categoryId, hidden, stock, stockMin, stockTracked }
   sales: [],        // { id, jornadaNumber, date, name, items:[...], subtotal, discount, total, method, cash, qr, delivery:{...}, deleted }
   cart: [],         // { productId, name, price, qty, discountType, discountValue }
@@ -140,6 +141,7 @@ let state = {
 
 let currentArea = "landing";    // "landing" | "cajero" | "entrega" | "config-general"
 let currentCategoryId = null;   // categoría abierta en Nueva venta
+let currentSubcategoryId = null; // subcategoría abierta dentro de esa categoría (o null)
 let selectedPayMethod = null;   // solo para resaltar visualmente el último método usado
 let editingSaleId = null;       // si no es null, se está editando una venta existente
 let editingSaleOriginal = null; // { method, cash, qr } de la venta que se está editando, para precargar su modal de pago
@@ -235,6 +237,7 @@ function normalizeProductDefaults(p, idx){
   if (!p.questions) p.questions = [];
   if (p.kitchen === undefined || p.kitchen === null) p.kitchen = false;
   if (p.order === undefined || p.order === null) p.order = idx;
+  if (typeof p.subcategoryId !== "string") p.subcategoryId = "";
 }
 function normalizeSnapshotDefaults(){
   if (!lastSyncSnapshot) return;
@@ -255,11 +258,17 @@ function normalizeSnapshotDefaults(){
     });
   }
   // La cuadrícula elegida es individual de cada dispositivo: no se sincroniza.
-  if (lastSyncSnapshot.meta) delete lastSyncSnapshot.meta.selectedGridSizeIndex;
+  if (lastSyncSnapshot.meta){
+    delete lastSyncSnapshot.meta.selectedGridSizeIndex;
+    if (!lastSyncSnapshot.meta.subcategories) lastSyncSnapshot.meta.subcategories = [];
+  }
 }
 
 function applyDefaultsAndMigrations(){
   if (!state.pendingSales) state.pendingSales = [];
+  if (!Array.isArray(state.subcategories)) state.subcategories = [];
+  // Subcategorías huérfanas (su categoría ya no existe) no se muestran en ningún lado.
+  state.subcategories = state.subcategories.filter(sc => state.categories.some(c => c.id === sc.categoryId));
   if (!state.gridSizes || state.gridSizes.length === 0) state.gridSizes = defaultGridSizes();
   if (state.selectedGridSizeIndex === undefined || state.selectedGridSizeIndex === null || !state.gridSizes[state.selectedGridSizeIndex]){
     const idx = state.gridSizes.findIndex(g => g.rows === 3 && g.cols === 3);
@@ -327,6 +336,25 @@ function uid(prefix){
 function productsInCategory(catId){
   return state.products.filter(p => p.categoryId === catId).sort((a,b) => (a.order||0) - (b.order||0));
 }
+// Productos de una categoría que NO están en ninguna subcategoría (subId "")
+// o los de una subcategoría concreta, ordenados.
+function productsInGroup(catId, subId){
+  const sid = subId || "";
+  return productsInCategory(catId).filter(p => (p.subcategoryId || "") === sid);
+}
+function subcategoriesOf(catId){
+  return (state.subcategories || []).filter(sc => sc.categoryId === catId);
+}
+// Un producto cuya subcategoría ya no existe se trata como "sin subcategoría".
+function effectiveSubId(p){
+  const sid = p.subcategoryId || "";
+  return sid && (state.subcategories || []).some(sc => sc.id === sid && sc.categoryId === p.categoryId) ? sid : "";
+}
+function subcategoryName(p){
+  const sid = effectiveSubId(p);
+  const sc = sid ? state.subcategories.find(x => x.id === sid) : null;
+  return sc ? sc.name : "";
+}
 
 // ---------- FIREBASE: SINCRONIZACIÓN ENTRE DISPOSITIVOS ----------
 function arrayToMapById(arr){
@@ -376,6 +404,7 @@ function buildMetaObject(){
   return {
     businessName: state.businessName,
     categories: state.categories,
+    subcategories: state.subcategories || [],
     gridSizes: state.gridSizes,
     cashRegister: state.cashRegister,
     stockEnabled: state.stockEnabled,
@@ -397,11 +426,16 @@ function buildMetaObject(){
 // reemplaza cualquier valor null por un marcador de texto que Firebase sí
 // guarda tal cual; al leerlo de vuelta, se vuelve a convertir en null.
 const FB_NULL_MARKER = "__POS_SHALOM_NULL__";
+// Firebase también borra los arreglos vacíos: si se elimina la última
+// subcategoría, la clave desaparecería y los otros dispositivos nunca se
+// enterarían. Se guarda un marcador de texto para "lista vacía".
+const FB_EMPTY_ARRAY_MARKER = "__POS_SHALOM_EMPTY_ARRAY__";
 function encodeMetaForFirebase(metaObj){
   const out = Object.assign({}, metaObj);
   Object.keys(out).forEach(key => {
     if (out[key] === null) out[key] = FB_NULL_MARKER;
   });
+  if (Array.isArray(out.subcategories) && out.subcategories.length === 0) out.subcategories = FB_EMPTY_ARRAY_MARKER;
   return out;
 }
 function decodeMetaFromFirebase(remoteMeta){
@@ -410,6 +444,9 @@ function decodeMetaFromFirebase(remoteMeta){
   Object.keys(out).forEach(key => {
     if (out[key] === FB_NULL_MARKER) out[key] = null;
   });
+  if (out.subcategories === FB_EMPTY_ARRAY_MARKER) out.subcategories = [];
+  // Firebase puede devolver arreglos como objetos si faltan índices.
+  if (out.subcategories && !Array.isArray(out.subcategories)) out.subcategories = Object.values(out.subcategories);
   // La cuadrícula elegida es individual de cada dispositivo (cada uno la
   // acomoda a su pantalla): se ignora aunque haya quedado guardada en la nube.
   delete out.selectedGridSizeIndex;
@@ -562,12 +599,11 @@ function pushStateToFirebase(){
       persistSyncState();
       setFbStatus("ok");
       // Como el stock se suma en el servidor, el total real puede diferir de lo
-      // que este dispositivo calculó: se lee de vuelta para mostrar el correcto.
-      if (typeof fbRootRef.once === "function"){
-        fbRootRef.once("value").then(snap => {
-          const rv = snap.val();
-          if (rv && applyRemoteSnapshot(rv)) refreshVisibleView();
-        }).catch(() => {});
+      // que este dispositivo calculó. Se vuelve a aplicar lo último que ya
+      // llegó de la nube (en memoria, SIN descargar nada nuevo).
+      if (appStarted && Object.keys(remoteCache).length){
+        const remoteNow = assembleRemote();
+        if (Object.keys(remoteNow).length && applyRemoteSnapshot(remoteNow)) refreshVisibleView();
       }
     }).catch(err => {
       console.error("No se pudo sincronizar con Firebase (revisa las reglas de la base de datos en Firebase Console):", err);
@@ -796,6 +832,7 @@ function adoptRemoteDirectly(remote){
   if (decodedMeta){
     state.businessName = decodedMeta.businessName;
     state.categories = decodedMeta.categories ? deepClone(decodedMeta.categories) : state.categories;
+    state.subcategories = decodedMeta.subcategories ? deepClone(decodedMeta.subcategories) : (state.subcategories || []);
     state.gridSizes = (decodedMeta.gridSizes && decodedMeta.gridSizes.length) ? deepClone(decodedMeta.gridSizes) : state.gridSizes;
     state.cashRegister = decodedMeta.cashRegister !== undefined ? deepClone(decodedMeta.cashRegister) : state.cashRegister;
     state.stockEnabled = decodedMeta.stockEnabled !== undefined ? decodedMeta.stockEnabled : state.stockEnabled;
@@ -834,6 +871,7 @@ function applyRemoteSnapshot(remote){
     if (stableStringify(mergedMeta) !== stableStringify(buildMetaObject())){
       state.businessName = mergedMeta.businessName;
       state.categories = mergedMeta.categories || state.categories;
+      state.subcategories = mergedMeta.subcategories || state.subcategories || [];
       state.gridSizes = (mergedMeta.gridSizes && mergedMeta.gridSizes.length) ? mergedMeta.gridSizes : state.gridSizes;
       state.cashRegister = mergedMeta.cashRegister !== undefined ? mergedMeta.cashRegister : state.cashRegister;
       state.stockEnabled = mergedMeta.stockEnabled !== undefined ? mergedMeta.stockEnabled : state.stockEnabled;
@@ -889,21 +927,69 @@ function applyRemoteSnapshot(remote){
   return changed;
 }
 
+// ---------- DESCARGAS DE FIREBASE (plan gratuito) ----------
+// Antes: al abrir un dispositivo se hacía una lectura completa de la base
+// (once) Y ADEMÁS se enganchaba un listener sobre toda la base, que volvía a
+// bajar todo: cada apertura/recarga descargaba TODO dos veces. Además el
+// listener sobre la raíz también bajaba cualquier cosa nueva que se guardara
+// ahí (como el archivo histórico). Ahora: un solo listener por cada rama que
+// el sistema realmente usa (la primera lectura de cada una es la lectura
+// inicial), y lo archivado de jornadas viejas ("archive") nunca se descarga.
+const SYNC_CHILDREN = ["meta", "products", "sales", "pendingSales", "cashMovements", "cashClosures"];
+let remoteCache = {};
+let remoteReceived = {};
+let remoteApplyTimer = null;
+let firstSyncResolve = null;
+let remoteListenersAttached = false;
+
+function assembleRemote(){
+  const r = {};
+  SYNC_CHILDREN.forEach(k => {
+    if (remoteCache[k] !== null && remoteCache[k] !== undefined) r[k] = remoteCache[k];
+  });
+  return r;
+}
+
+// Aplica lo que haya llegado de Firebase. Un dispositivo que nunca confirmó
+// nada adopta los datos de la nube tal cual; uno que ya sincronizó los fusiona.
+function applyRemoteOrAdopt(remote){
+  if (!lastSyncSnapshot || lastSyncSnapshot.meta === null){
+    adoptRemoteDirectly(remote);
+    return true;
+  }
+  return applyRemoteSnapshot(remote);
+}
+
+function handleRemoteUpdate(){
+  setFbStatus("ok");
+  const remote = assembleRemote();
+  if (Object.keys(remote).length === 0) return;
+  const changed = applyRemoteOrAdopt(remote);
+  if (changed) refreshVisibleView();
+}
+
 function attachFirebaseListener(){
-  if (!fbReady) return;
-  fbRootRef.on("value", (snap) => {
-    if (!appStarted) return; // el arranque ya maneja la primera lectura con startApp()
-    setFbStatus("ok");
-    const remote = snap.val();
-    if (!remote) return;
-    const changed = applyRemoteSnapshot(remote);
-    if (changed) refreshVisibleView();
-  }, (err) => {
-    // Esto se dispara, por ejemplo, si las reglas de la base de datos no
-    // permiten leer/escribir: antes pasaba inadvertido porque no había
-    // una función de error registrada aquí.
-    console.error("Error del listener de Firebase (revisa las reglas de la base de datos en Firebase Console):", err);
-    setFbStatus("error");
+  if (!fbReady || remoteListenersAttached) return;
+  remoteListenersAttached = true;
+  SYNC_CHILDREN.forEach(key => {
+    fbRootRef.child(key).on("value", (snap) => {
+      remoteCache[key] = snap.val();
+      remoteReceived[key] = true;
+      if (!SYNC_CHILDREN.every(k => remoteReceived[k])) return; // faltan ramas por llegar
+      if (!appStarted){
+        // Todavía arrancando: startApp() maneja la primera lectura.
+        if (firstSyncResolve){ const f = firstSyncResolve; firstSyncResolve = null; f(); }
+        return;
+      }
+      // Varias ramas pueden cambiar en un mismo envío: se procesan juntas.
+      clearTimeout(remoteApplyTimer);
+      remoteApplyTimer = setTimeout(handleRemoteUpdate, 0);
+    }, (err) => {
+      // Esto se dispara, por ejemplo, si las reglas de la base de datos no
+      // permiten leer/escribir.
+      console.error("Error del listener de Firebase (revisa las reglas de la base de datos en Firebase Console):", err);
+      setFbStatus("error");
+    });
   });
 }
 function debounce(fn, wait){
@@ -1064,7 +1150,7 @@ function switchView(viewName){
   if (navBtn) navBtn.classList.add("active");
 
   if (viewName === "resumen") renderResumenDia();
-  if (viewName === "newsale") { currentCategoryId = null; renderCategories(); renderCart(); renderPendingBadge(); }
+  if (viewName === "newsale") { currentCategoryId = null; currentSubcategoryId = null; renderCategories(); renderCart(); renderPendingBadge(); }
   if (viewName === "history") renderHistory();
   if (viewName === "products") renderProductAdmin();
   if (viewName === "cashregister") renderCashRegisterView();
@@ -1090,6 +1176,8 @@ function switchView(viewName){
   // sí estaba guardada correctamente por debajo.
   if (viewName === "deliverydetail") renderDeliveryDetail();
   if (viewName === "visibility") renderVisibilityScreen();
+  if (viewName === "categories") renderCategoryAdminList();
+  if (viewName === "subcategories") renderSubcategoryAdminList();
   if (viewName === "stock") renderStockScreen();
   if (viewName === "stocklow") renderStockLowScreen();
 
@@ -1129,7 +1217,7 @@ document.getElementById("mobileMenuBtn").addEventListener("click", () => {
 // Vuelve a acomodar la cuadrícula visible de Nueva venta si cambia el tamaño de la ventana
 window.addEventListener("resize", debounce(() => {
   if (document.getElementById("view-newsale").classList.contains("active")){
-    if (currentCategoryId) renderProductGrid(currentCategoryId); else renderCategoryGrid();
+    if (currentCategoryId) renderProductGrid(currentCategoryId, currentSubcategoryId); else renderCategoryGrid();
   }
 }, 200));
 
@@ -1393,6 +1481,41 @@ function computeProductDetail(sales){
   return Object.entries(map).map(([name, qty]) => ({ name, qty })).sort((a,b) => b.qty - a.qty);
 }
 
+// ---------- ARCHIVO DE JORNADAS CERRADAS (ahorro de descargas) ----------
+// Cada cierre de caja ya guarda su propio resumen completo (totales, detalle
+// de productos, ventas, movimientos) dentro de "cashClosures", y el resto del
+// sistema solo usa las ventas/movimientos de la jornada ABIERTA. Aun así, las
+// ventas y movimientos de jornadas viejas seguían en la base "viva" y TODOS
+// los dispositivos los descargaban completos en cada apertura/recarga, cada
+// vez más con el paso de los días. Ahora, las de jornadas ya cerradas se
+// mueven a "archive/" (nada las vuelve a descargar) y se quitan de la base
+// viva. Se copia al archivo PRIMERO y solo cuando Firebase lo confirma se
+// quitan: si algo falla, no se pierde nada, se reintenta en el próximo cierre
+// o arranque.
+let archiving = false;
+function archiveOldJornadaData(){
+  if (!fbReady || !appStarted || fbStatus !== "ok" || archiving) return;
+  const cutoff = state.cashRegister && state.cashRegister.openedAt ? new Date(state.cashRegister.openedAt).getTime() : Infinity;
+  const oldSales = state.sales.filter(s => new Date(s.date).getTime() < cutoff && s.id !== editingSaleId);
+  const oldMoves = (state.cashMovements || []).filter(m => new Date(m.date).getTime() < cutoff);
+  if (oldSales.length === 0 && oldMoves.length === 0) return;
+  archiving = true;
+  const upd = {};
+  oldSales.forEach(x => { upd["archive/sales/" + x.id] = deepClone(x); });
+  oldMoves.forEach(x => { upd["archive/cashMovements/" + x.id] = deepClone(x); });
+  fbRootRef.update(upd).then(() => {
+    const saleIds = new Set(oldSales.map(x => String(x.id)));
+    const moveIds = new Set(oldMoves.map(x => String(x.id)));
+    state.sales = state.sales.filter(x => !saleIds.has(String(x.id)));
+    state.cashMovements = (state.cashMovements || []).filter(x => !moveIds.has(String(x.id)));
+    archiving = false;
+    saveState(); // el envío normal quita estos registros de la base viva
+  }).catch(err => {
+    archiving = false;
+    console.error("No se pudo archivar el historial viejo (se reintentará):", err);
+  });
+}
+
 function performCloseRegister(){
   const reg = state.cashRegister;
   if (!reg) return;
@@ -1430,6 +1553,7 @@ function performCloseRegister(){
   state.cashClosures.push(closure);
   state.cashRegister = null;
   saveState();
+  setTimeout(archiveOldJornadaData, 1500);
   showClosureSummary(closure, false);
   exportClosurePdf(closure);
 }
@@ -1789,8 +1913,20 @@ function categoriesWithVisibleProducts(){
   return state.categories.filter(cat => state.products.some(p => p.categoryId === cat.id && isProductAvailableForSale(p)));
 }
 
+// Aplica los colores elegidos (fondo / letra) a un botón de Nueva venta.
+function applyItemColors(btn, item){
+  if (!item || (!item.bgColor && !item.textColor)) return;
+  btn.classList.add("colored");
+  if (item.bgColor){ btn.style.background = item.bgColor; btn.style.borderColor = item.bgColor; }
+  if (item.textColor){ btn.style.color = item.textColor; btn.querySelectorAll(".name").forEach(n => { n.style.color = item.textColor; }); }
+}
+function escapeHtml(str){
+  return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
 function renderCategories(){
   currentCategoryId = null;
+  currentSubcategoryId = null;
   categoryPage = 0;
   document.getElementById("pickerTitle").textContent = "Categorías";
   document.getElementById("btnBackToCats").classList.add("hidden");
@@ -1820,7 +1956,8 @@ function renderCategoryGrid(){
   pageItems.forEach(cat => {
     const btn = document.createElement("button");
     btn.className = "pick-card";
-    btn.innerHTML = `<span class="name">${cat.name}</span>`;
+    btn.innerHTML = `<span class="name">${escapeHtml(cat.name)}</span>`;
+    applyItemColors(btn, cat);
     btn.addEventListener("click", () => openCategory(cat.id));
     grid.appendChild(btn);
   });
@@ -1828,36 +1965,65 @@ function renderCategoryGrid(){
   renderPagination("pickerPagination", categoryPage, totalPages, (p) => { categoryPage = p; renderCategoryGrid(); });
 }
 
-function openCategory(catId){
+function openCategory(catId, subId){
   currentCategoryId = catId;
+  currentSubcategoryId = subId || null;
   productPage = 0;
   const cat = state.categories.find(c => c.id === catId);
-  document.getElementById("pickerTitle").textContent = cat.name;
+  const sub = subId ? (state.subcategories || []).find(sc => sc.id === subId) : null;
+  document.getElementById("pickerTitle").textContent = sub ? `${cat.name} › ${sub.name}` : cat.name;
+  document.getElementById("btnBackToCats").textContent = sub ? `← Volver a ${cat.name}` : "← Volver a categorías";
   document.getElementById("btnBackToCats").classList.remove("hidden");
   document.getElementById("categoryGrid").classList.add("hidden");
   document.getElementById("productGrid").classList.remove("hidden");
-  renderProductGrid(catId);
+  renderProductGrid(catId, currentSubcategoryId);
 }
 
-function renderProductGrid(catId){
+function renderProductGrid(catId, subId){
   const grid = document.getElementById("productGrid");
   grid.innerHTML = "";
 
-  const prods = productsInCategory(catId).filter(p => isProductAvailableForSale(p));
-  if (prods.length === 0){
+  // Si la categoría/subcategoría que se estaba mirando ya no existe (otro
+  // dispositivo la borró), se vuelve al nivel anterior.
+  if (!state.categories.some(c => c.id === catId)){ renderCategories(); return; }
+  if (subId && !(state.subcategories || []).some(sc => sc.id === subId && sc.categoryId === catId)){ openCategory(catId, null); return; }
+
+  let items;
+  if (subId){
+    items = productsInGroup(catId, subId).filter(p => isProductAvailableForSale(p)).map(p => ({ type: "prod", p }));
+  } else {
+    // Dentro de una categoría: primero las subcategorías (que tengan algo
+    // disponible) y luego los productos que no pertenecen a ninguna.
+    const subs = subcategoriesOf(catId)
+      .filter(sc => state.products.some(p => p.categoryId === catId && effectiveSubId(p) === sc.id && isProductAvailableForSale(p)))
+      .map(sc => ({ type: "sub", sc }));
+    const loose = productsInCategory(catId).filter(p => effectiveSubId(p) === "" && isProductAvailableForSale(p)).map(p => ({ type: "prod", p }));
+    items = subs.concat(loose);
+  }
+  if (items.length === 0){
     document.getElementById("pickerPagination").classList.add("hidden");
-    grid.innerHTML = `<p class="empty-msg">No hay productos disponibles en esta categoría.</p>`;
+    grid.innerHTML = `<p class="empty-msg">No hay productos disponibles en esta ${subId ? "subcategoría" : "categoría"}.</p>`;
     return;
   }
 
   const { rows, cols } = getSelectedGridSize();
   const perPage = rows * cols;
-  const totalPages = Math.max(1, Math.ceil(prods.length / perPage));
+  const totalPages = Math.max(1, Math.ceil(items.length / perPage));
   if (productPage >= totalPages) productPage = totalPages - 1;
-  const pageItems = prods.slice(productPage * perPage, productPage * perPage + perPage);
+  const pageItems = items.slice(productPage * perPage, productPage * perPage + perPage);
 
   grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-  pageItems.forEach(p => {
+  pageItems.forEach(it => {
+    if (it.type === "sub"){
+      const sbtn = document.createElement("button");
+      sbtn.className = "pick-card";
+      sbtn.innerHTML = `<span class="name">${escapeHtml(it.sc.name)}</span>`;
+      applyItemColors(sbtn, it.sc);
+      sbtn.addEventListener("click", () => openCategory(catId, it.sc.id));
+      grid.appendChild(sbtn);
+      return;
+    }
+    const p = it.p;
     const lowStock = stockAppliesTo(p) && p.stock <= p.stockMin;
     const btn = document.createElement("button");
     btn.className = "pick-card";
@@ -1870,10 +2036,13 @@ function renderProductGrid(catId){
     grid.appendChild(btn);
   });
 
-  renderPagination("pickerPagination", productPage, totalPages, (p) => { productPage = p; renderProductGrid(catId); });
+  renderPagination("pickerPagination", productPage, totalPages, (p) => { productPage = p; renderProductGrid(catId, subId); });
 }
 
-document.getElementById("btnBackToCats").addEventListener("click", renderCategories);
+document.getElementById("btnBackToCats").addEventListener("click", () => {
+  if (currentCategoryId && currentSubcategoryId) openCategory(currentCategoryId, null);
+  else renderCategories();
+});
 
 // ---------- CARRITO ----------
 function addToCart(productId){
@@ -2695,7 +2864,8 @@ function renderProdCategoryGrid(){
     const count = state.products.filter(p => p.categoryId === cat.id).length;
     const btn = document.createElement("button");
     btn.className = "pick-card";
-    btn.innerHTML = `<span class="name">${cat.name}</span><span class="price">${count} producto${count===1?"":"s"}</span>`;
+    btn.innerHTML = `<span class="name">${escapeHtml(cat.name)}</span><span class="price">${count} producto${count===1?"":"s"}</span>`;
+    applyItemColors(btn, cat);
     btn.addEventListener("click", () => openProdCategory(cat.id));
     wrap.appendChild(btn);
   });
@@ -2720,6 +2890,24 @@ function renderProductAdminList(catId){
     wrap.innerHTML = `<p class="empty-msg">Sin productos todavía en esta categoría.</p>`;
     return;
   }
+  // Grupos: una sección por subcategoría y al final los productos sueltos.
+  const subs = subcategoriesOf(catId);
+  const groups = subs.map(sc => ({ label: sc.name, list: productsInGroup(catId, sc.id) })).filter(g => g.list.length);
+  const loose = prods.filter(p => effectiveSubId(p) === "");
+  if (loose.length) groups.push({ label: subs.length ? "Sin subcategoría" : null, list: loose });
+  groups.forEach(g => {
+    if (g.label){
+      const h = document.createElement("div");
+      h.className = "admin-group-title";
+      h.textContent = g.label;
+      wrap.appendChild(h);
+    }
+    renderAdminProductRows(wrap, g.list);
+  });
+  bindAdminProductActions(wrap, catId);
+}
+
+function renderAdminProductRows(wrap, prods){
   prods.forEach((p, idx) => {
     const row = document.createElement("div");
     row.className = "admin-prod-row" + (p.hidden ? " hidden-product" : "");
@@ -2739,7 +2927,9 @@ function renderProductAdminList(catId){
     `;
     wrap.appendChild(row);
   });
+}
 
+function bindAdminProductActions(wrap, catId){
   wrap.querySelectorAll("[data-move-prod-up]").forEach(b => b.addEventListener("click", () => moveProduct(b.dataset.moveProdUp, -1)));
   wrap.querySelectorAll("[data-move-prod-down]").forEach(b => b.addEventListener("click", () => moveProduct(b.dataset.moveProdDown, 1)));
   wrap.querySelectorAll("[data-edit-prod]").forEach(b => b.addEventListener("click", () => openEditProductModal(b.dataset.editProd)));
@@ -2769,10 +2959,15 @@ function refreshProductAdminView(){
 function moveProduct(productId, dir){
   const prod = state.products.find(p => p.id === productId);
   if (!prod) return;
-  const sameCat = productsInCategory(prod.categoryId);
+  const sameCat = productsInGroup(prod.categoryId, effectiveSubId(prod));
   const idx = sameCat.indexOf(prod);
   const newIdx = idx + dir;
   if (newIdx < 0 || newIdx >= sameCat.length) return;
+  // Si hay órdenes repetidos, se renumera el grupo para que el cambio tenga efecto.
+  if (new Set(sameCat.map(p => p.order)).size !== sameCat.length){
+    const base = Math.min(...sameCat.map(p => p.order || 0));
+    sameCat.forEach((p, i) => { p.order = base + i; });
+  }
   const other = sameCat[newIdx];
   const tmpOrder = prod.order;
   prod.order = other.order;
@@ -2794,6 +2989,8 @@ function syncProductFormDraftFromDom(){
   if (!nameEl) return;
   d.name = nameEl.value;
   d.categoryId = document.getElementById("pfCat").value;
+  const subEl = document.getElementById("pfSub");
+  d.subcategoryId = subEl ? subEl.value : "";
   d.price = document.getElementById("pfPrice").value;
   d.cost = document.getElementById("pfCost").value;
   if (state.stockEnabled){
@@ -2817,7 +3014,7 @@ document.getElementById("btnAddProduct").addEventListener("click", () => {
     return;
   }
   productFormDraft = {
-    mode: "add", categoryId: currentProdCategoryId || state.categories[0].id, name: "", price: "", cost: "",
+    mode: "add", categoryId: currentProdCategoryId || state.categories[0].id, subcategoryId: "", name: "", price: "", cost: "",
     stock: 0, stockMin: 0, stockTracked: state.stockEnabled, advanced: false, questions: [], kitchen: false
   };
   renderProductFormModal();
@@ -2827,7 +3024,7 @@ function openEditProductModal(productId){
   const p = state.products.find(x => x.id === productId);
   if (!p) return;
   productFormDraft = {
-    mode: "edit", productId: p.id, categoryId: p.categoryId, name: p.name, price: p.price, cost: p.cost || 0,
+    mode: "edit", productId: p.id, categoryId: p.categoryId, subcategoryId: effectiveSubId(p), name: p.name, price: p.price, cost: p.cost || 0,
     stockMin: p.stockMin || 0, stockTracked: !!p.stockTracked, hidden: p.hidden,
     advanced: !!p.advanced, questions: p.questions ? JSON.parse(JSON.stringify(p.questions)) : [],
     kitchen: !!p.kitchen
@@ -2841,7 +3038,11 @@ function openEditProductModal(productId){
 // para reflejar el estado actual sin perder lo demás.
 function renderProductFormModal(){
   const d = productFormDraft;
-  const catOptions = state.categories.map(c => `<option value="${c.id}" ${c.id===d.categoryId?"selected":""}>${c.name}</option>`).join("");
+  const catOptions = state.categories.map(c => `<option value="${c.id}" ${c.id===d.categoryId?"selected":""}>${escapeHtml(c.name)}</option>`).join("");
+  // Si la subcategoría elegida no pertenece a la categoría actual, se descarta.
+  const subsOfCat = subcategoriesOf(d.categoryId);
+  if (d.subcategoryId && !subsOfCat.some(sc => sc.id === d.subcategoryId)) d.subcategoryId = "";
+  const subOptions = `<option value="">Sin subcategoría</option>` + subsOfCat.map(sc => `<option value="${sc.id}" ${sc.id===d.subcategoryId?"selected":""}>${escapeHtml(sc.name)}</option>`).join("");
   const questionsHtml = d.questions.length
     ? d.questions.map((q, idx) => `<div class="question-row" data-question-idx="${idx}">${idx+1}. ${q.text}</div>`).join("")
     : `<p class="muted" style="font-size:.85rem;">Todavía no hay preguntas configuradas.</p>`;
@@ -2852,6 +3053,8 @@ function renderProductFormModal(){
     <input type="text" id="pfName" value="${d.name}" placeholder="Ej: Hamburguesa doble">
     <label>Categoría</label>
     <select id="pfCat">${catOptions}</select>
+    <label>Subcategoría</label>
+    <select id="pfSub">${subOptions}</select>
     <label>Precio (Bs)</label>
     <input type="number" id="pfPrice" min="0" value="${d.price}" placeholder="0.00">
     <label>Costo (Bs)</label>
@@ -2894,6 +3097,8 @@ function renderProductFormModal(){
   `);
 
   document.getElementById("pfCancel").addEventListener("click", () => { productFormDraft = null; closeModal(); });
+  // Al cambiar la categoría, la lista de subcategorías se actualiza.
+  document.getElementById("pfCat").addEventListener("change", () => { syncProductFormDraftFromDom(); d.subcategoryId = ""; renderProductFormModal(); });
 
   document.getElementById("pfKitchenOn").addEventListener("click", () => { syncProductFormDraftFromDom(); d.kitchen = true; renderProductFormModal(); });
   document.getElementById("pfKitchenOff").addEventListener("click", () => { syncProductFormDraftFromDom(); d.kitchen = false; renderProductFormModal(); });
@@ -2937,15 +3142,21 @@ function renderProductFormModal(){
     if (d.mode === "add"){
       const stock = state.stockEnabled ? readIntOrZero(d.stock) : 0;
       const stockMin = state.stockEnabled ? readIntOrZero(d.stockMin) : 0;
-      const maxOrder = productsInCategory(d.categoryId).reduce((m,p) => Math.max(m, p.order||0), -1);
+      const maxOrder = productsInGroup(d.categoryId, d.subcategoryId).reduce((m,p) => Math.max(m, p.order||0), -1);
       state.products.push({
-        id: uid("p"), name, price, cost, categoryId: d.categoryId, hidden: false,
+        id: uid("p"), name, price, cost, categoryId: d.categoryId, subcategoryId: d.subcategoryId || "", hidden: false,
         order: maxOrder + 1,
         stock, stockMin, stockTracked: state.stockEnabled ? !!d.stockTracked : false,
         advanced: d.advanced, questions: d.questions, kitchen: !!d.kitchen
       });
     } else {
       const p = state.products.find(x => x.id === d.productId);
+      const moved = p.categoryId !== d.categoryId || (p.subcategoryId || "") !== (d.subcategoryId || "");
+      if (moved){
+        const maxOrder = productsInGroup(d.categoryId, d.subcategoryId).reduce((m,x) => Math.max(m, x.order||0), -1);
+        p.order = maxOrder + 1;
+      }
+      p.subcategoryId = d.subcategoryId || "";
       p.name = name; p.categoryId = d.categoryId; p.price = price; p.cost = cost; p.hidden = d.hidden;
       if (state.stockEnabled){
         p.stockMin = readIntOrZero(d.stockMin);
@@ -3010,6 +3221,240 @@ function openQuestionEditor(idx){
   });
 }
 
+// ---------- COLORES DE CATEGORÍAS / SUBCATEGORÍAS ----------
+// 36 colores de fondo y 36 de letra. Los de letra incluyen blancos, negros,
+// grises y tonos claros/oscuros para poder contrastar con cualquier fondo.
+const BG_COLOR_PALETTE = [
+  "#b71c1c","#e53935","#ef9a9a","#e65100","#fb8c00","#ffcc80",
+  "#f9a825","#fdd835","#fff59d","#827717","#c0ca33","#e6ee9c",
+  "#1b5e20","#43a047","#a5d6a7","#004d40","#00897b","#80cbc4",
+  "#01579b","#039be5","#81d4fa","#0d47a1","#1e88e5","#90caf9",
+  "#311b92","#7e57c2","#d1c4e9","#880e4f","#d81b60","#f8bbd0",
+  "#3e2723","#795548","#d7ccc8","#212121","#757575","#eeeeee"
+];
+const TEXT_COLOR_PALETTE = [
+  "#ffffff","#f5f5f5","#e0e0e0","#bdbdbd","#9e9e9e","#616161",
+  "#424242","#212121","#000000","#fff8e1","#ffeb3b","#ffc107",
+  "#ff9800","#ff5722","#f44336","#b71c1c","#880e4f","#e91e63",
+  "#f8bbd0","#9c27b0","#4a148c","#311b92","#3f51b5","#0d47a1",
+  "#2196f3","#81d4fa","#00bcd4","#006064","#009688","#004d40",
+  "#4caf50","#1b5e20","#8bc34a","#cddc39","#795548","#3e2723"
+];
+
+function colorLuminance(hex){
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(v => {
+    v /= 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+}
+function contrastRatio(hexA, hexB){
+  const a = colorLuminance(hexA), b = colorLuminance(hexB);
+  if (a === null || b === null) return null;
+  const hi = Math.max(a, b), lo = Math.min(a, b);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+// Cuadradito de color que se muestra junto al nombre en las listas de administración.
+function colorChipHtml(item){
+  if (!item || (!item.bgColor && !item.textColor)) return "";
+  const bg = item.bgColor || "#ffffff";
+  const fg = item.textColor || "#000000";
+  return `<span class="color-chip" style="background:${bg};color:${fg};">Aa</span>`;
+}
+
+// Los dos botones (color de fondo / color de letra) con su vista previa.
+function colorFieldsHtml(){
+  return `
+    <div class="color-fields">
+      <div class="color-field-row">
+        <button type="button" class="btn-ghost color-open-btn" id="clrBgBtn"><span class="color-dot" id="clrBgDot"></span>Color de fondo</button>
+        <button type="button" class="btn-ghost color-open-btn" id="clrTextBtn"><span class="color-dot" id="clrTextDot"></span>Color de letra</button>
+      </div>
+      <div class="color-panel hidden" id="clrPanel"></div>
+      <div class="color-preview-wrap"><span class="muted" style="font-size:.8rem;">Vista previa</span><div class="color-preview" id="clrPreview">Texto</div></div>
+      <p class="color-warn hidden" id="clrWarn">⚠ Estos dos colores se leen con dificultad. Prueba otra combinación.</p>
+    </div>`;
+}
+
+// Conecta los botones del bloque anterior. Devuelve un objeto con "bg" y "text"
+// (valor actual; null = sin color elegido).
+function bindColorFields(initialBg, initialText, getLabel){
+  const result = { bg: initialBg || null, text: initialText || null };
+  const panel = document.getElementById("clrPanel");
+  let open = null;
+
+  function refresh(){
+    const dotBg = document.getElementById("clrBgDot");
+    const dotText = document.getElementById("clrTextDot");
+    dotBg.style.background = result.bg || "transparent";
+    dotText.style.background = result.text || "transparent";
+    const prev = document.getElementById("clrPreview");
+    prev.textContent = getLabel ? getLabel() : "Texto";
+    prev.style.background = result.bg || "";
+    prev.style.color = result.text || "";
+    const ratio = contrastRatio(result.bg || "#1a2233", result.text || "#ffffff");
+    // Sin elegir uno de los dos, se compara contra el color normal del sistema (aprox.).
+    const warn = document.getElementById("clrWarn");
+    if (warn) warn.classList.toggle("hidden", !(result.bg && result.text && ratio !== null && ratio < 3));
+  }
+  function showPanel(kind){
+    if (open === kind){ panel.classList.add("hidden"); open = null; return; }
+    open = kind;
+    const palette = kind === "bg" ? BG_COLOR_PALETTE : TEXT_COLOR_PALETTE;
+    const current = kind === "bg" ? result.bg : result.text;
+    panel.innerHTML = `
+      <div class="color-panel-title">${kind === "bg" ? "Elige el color de fondo" : "Elige el color de la letra"}</div>
+      <div class="color-swatches">
+        ${palette.map(c => `<button type="button" class="color-swatch${c === current ? " selected" : ""}" data-color="${c}" style="background:${c};" aria-label="${c}"></button>`).join("")}
+        <button type="button" class="color-swatch none${!current ? " selected" : ""}" data-color="" title="Sin color">✕</button>
+      </div>`;
+    panel.classList.remove("hidden");
+    panel.querySelectorAll(".color-swatch").forEach(b => b.addEventListener("click", () => {
+      const val = b.dataset.color || null;
+      if (kind === "bg") result.bg = val; else result.text = val;
+      panel.querySelectorAll(".color-swatch").forEach(x => x.classList.toggle("selected", (x.dataset.color || null) === val));
+      refresh();
+    }));
+  }
+  document.getElementById("clrBgBtn").addEventListener("click", () => showPanel("bg"));
+  document.getElementById("clrTextBtn").addEventListener("click", () => showPanel("text"));
+  const nameInput = document.querySelector(".modal input[type=text]");
+  if (nameInput) nameInput.addEventListener("input", refresh);
+  refresh();
+  return result;
+}
+
+// ---------- SUBCATEGORÍAS (pantalla propia, igual que Categorías) ----------
+document.getElementById("btnAddSubcategory").addEventListener("click", openSubcategoriesScreen);
+document.getElementById("btnBackToProductsFromSub").addEventListener("click", () => switchView("products"));
+
+function openSubcategoriesScreen(){
+  switchViewRaw("subcategories");
+  renderSubcategoryAdminList();
+}
+
+function renderSubcategoryAdminList(){
+  const wrap = document.getElementById("subcategoryAdminList");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  if (state.categories.length === 0){
+    wrap.innerHTML = `<p class="empty-msg">Primero crea una categoría.</p>`;
+    return;
+  }
+  if (!state.subcategories || state.subcategories.length === 0){
+    wrap.innerHTML = `<p class="empty-msg">Todavía no hay subcategorías.</p>`;
+    return;
+  }
+  state.categories.forEach(cat => {
+    const subs = subcategoriesOf(cat.id);
+    if (!subs.length) return;
+    const h = document.createElement("div");
+    h.className = "admin-group-title";
+    h.textContent = cat.name;
+    wrap.appendChild(h);
+    subs.forEach((sc, idx) => {
+      const prodCount = state.products.filter(p => p.categoryId === cat.id && p.subcategoryId === sc.id).length;
+      const row = document.createElement("div");
+      row.className = "admin-prod-row";
+      row.innerHTML = `
+        <div class="admin-prod-info">
+          <span class="admin-prod-name">${colorChipHtml(sc)}${escapeHtml(sc.name)}</span>
+          <span class="admin-prod-meta">Categoría: ${escapeHtml(cat.name)} · Cantidad de productos: ${prodCount}</span>
+        </div>
+        <div class="admin-prod-actions">
+          <button class="mini-btn" data-move-sub-up="${sc.id}" ${idx===0?"disabled":""}>↑</button>
+          <button class="mini-btn" data-move-sub-down="${sc.id}" ${idx===subs.length-1?"disabled":""}>↓</button>
+          <button class="mini-btn" data-edit-sub="${sc.id}">Editar</button>
+          <button class="mini-btn danger" data-delete-sub="${sc.id}">Eliminar</button>
+        </div>`;
+      wrap.appendChild(row);
+    });
+  });
+  wrap.querySelectorAll("[data-move-sub-up]").forEach(b => b.addEventListener("click", () => moveSubcategory(b.dataset.moveSubUp, -1)));
+  wrap.querySelectorAll("[data-move-sub-down]").forEach(b => b.addEventListener("click", () => moveSubcategory(b.dataset.moveSubDown, 1)));
+  wrap.querySelectorAll("[data-edit-sub]").forEach(b => b.addEventListener("click", () => openSubcategoryModal(b.dataset.editSub)));
+  wrap.querySelectorAll("[data-delete-sub]").forEach(b => b.addEventListener("click", () => deleteSubcategory(b.dataset.deleteSub)));
+}
+
+function moveSubcategory(subId, dir){
+  const sc = state.subcategories.find(x => x.id === subId);
+  if (!sc) return;
+  const siblings = subcategoriesOf(sc.categoryId);
+  const i = siblings.indexOf(sc);
+  const other = siblings[i + dir];
+  if (!other) return;
+  const ia = state.subcategories.indexOf(sc), ib = state.subcategories.indexOf(other);
+  state.subcategories[ia] = other;
+  state.subcategories[ib] = sc;
+  saveState();
+  renderSubcategoryAdminList();
+}
+
+document.getElementById("btnAddSubcategoryScreen").addEventListener("click", () => openSubcategoryModal(null));
+
+// Agregar (subId = null) o editar una subcategoría.
+function openSubcategoryModal(subId){
+  const sc = subId ? state.subcategories.find(x => x.id === subId) : null;
+  if (subId && !sc) return;
+  if (!sc && state.categories.length === 0){ alert("Primero crea una categoría."); return; }
+  const catOptions = state.categories.map(c => `<option value="${c.id}" ${sc && sc.categoryId === c.id ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
+  showModal(`
+    <h2>${sc ? "Editar subcategoría" : "Agregar subcategoría"}</h2>
+    <label>Nombre</label>
+    <input type="text" id="subName" value="${sc ? escapeHtml(sc.name) : ""}" placeholder="Ej: Bocaditos">
+    <label>Categoría</label>
+    <select id="subCat">${catOptions}</select>
+    ${colorFieldsHtml()}
+    <div class="modal-actions">
+      <button class="modal-cancel" id="subCancel">Cancelar</button>
+      <button class="modal-confirm" id="subConfirm">Guardar</button>
+    </div>
+  `);
+  const colors = bindColorFields(sc ? sc.bgColor || null : null, sc ? sc.textColor || null : null, () => document.getElementById("subName").value || "Subcategoría");
+  document.getElementById("subCancel").addEventListener("click", closeModal);
+  document.getElementById("subConfirm").addEventListener("click", () => {
+    const name = document.getElementById("subName").value.trim();
+    const categoryId = document.getElementById("subCat").value;
+    if (!name || !categoryId) return;
+    if (sc){
+      const changedCat = sc.categoryId !== categoryId;
+      sc.name = name;
+      if (changedCat){
+        // Al mover la subcategoría a otra categoría, sus productos van con ella.
+        state.products.forEach(p => { if (p.subcategoryId === sc.id) p.categoryId = categoryId; });
+        sc.categoryId = categoryId;
+      }
+      if (colors.bg) sc.bgColor = colors.bg; else delete sc.bgColor;
+      if (colors.text) sc.textColor = colors.text; else delete sc.textColor;
+    } else {
+      const n = { id: uid("sc"), name, categoryId };
+      if (colors.bg) n.bgColor = colors.bg;
+      if (colors.text) n.textColor = colors.text;
+      state.subcategories.push(n);
+    }
+    saveState(); closeModal(); renderSubcategoryAdminList();
+  });
+}
+
+function deleteSubcategory(subId){
+  const sc = state.subcategories.find(x => x.id === subId);
+  if (!sc) return;
+  const prodCount = state.products.filter(p => p.subcategoryId === subId).length;
+  const msg = prodCount > 0
+    ? `Esta subcategoría tiene ${prodCount} producto(s) asociado(s). Si la eliminas, esos productos también se eliminarán. ¿Seguro que quieres continuar?`
+    : `¿Seguro que quieres eliminar la subcategoría "${sc.name}"?`;
+  openConfirmModal("Eliminar subcategoría", msg, () => {
+    state.products = state.products.filter(p => p.subcategoryId !== subId);
+    state.subcategories = state.subcategories.filter(x => x.id !== subId);
+    saveState();
+    renderSubcategoryAdminList();
+  }, true, {}, true);
+}
+
 // ---------- CATEGORÍAS (pantalla propia: agregar, editar, eliminar, ordenar) ----------
 document.getElementById("btnAddCategory").addEventListener("click", openCategoriesScreen);
 document.getElementById("btnBackToProducts").addEventListener("click", () => switchView("products"));
@@ -3037,7 +3482,7 @@ function renderCategoryAdminList(){
     row.className = "admin-prod-row";
     row.innerHTML = `
       <div class="admin-prod-info">
-        <span class="admin-prod-name">${cat.name}</span>
+        <span class="admin-prod-name">${colorChipHtml(cat)}${escapeHtml(cat.name)}</span>
         <span class="admin-prod-meta">Cantidad de productos: ${prodCount}</span>
       </div>
       <div class="admin-prod-actions">
@@ -3071,16 +3516,21 @@ document.getElementById("btnAddCategoryScreen").addEventListener("click", () => 
     <h2>Agregar categoría</h2>
     <label>Nombre</label>
     <input type="text" id="newCatNameScreen" placeholder="Ej: Postres">
+    ${colorFieldsHtml()}
     <div class="modal-actions">
       <button class="modal-cancel" id="catCancelScreen">Cancelar</button>
       <button class="modal-confirm" id="catConfirmScreen">Guardar</button>
     </div>
   `);
+  const colors = bindColorFields(null, null, () => document.getElementById("newCatNameScreen").value || "Categoría");
   document.getElementById("catCancelScreen").addEventListener("click", closeModal);
   document.getElementById("catConfirmScreen").addEventListener("click", () => {
     const name = document.getElementById("newCatNameScreen").value.trim();
     if (!name) return;
-    state.categories.push({ id: uid("c"), name });
+    const cat = { id: uid("c"), name };
+    if (colors.bg) cat.bgColor = colors.bg;
+    if (colors.text) cat.textColor = colors.text;
+    state.categories.push(cat);
     saveState(); closeModal(); renderCategoryAdminList();
   });
 });
@@ -3091,17 +3541,22 @@ function openEditCategoryModal(catId){
   showModal(`
     <h2>Editar categoría</h2>
     <label>Nombre</label>
-    <input type="text" id="editCatName" value="${cat.name}">
+    <input type="text" id="editCatName" value="${escapeHtml(cat.name)}">
+    ${colorFieldsHtml()}
     <div class="modal-actions">
       <button class="modal-cancel" id="editCatCancel">Cancelar</button>
       <button class="modal-confirm" id="editCatConfirm">Guardar</button>
     </div>
   `);
+  const colors = bindColorFields(cat.bgColor || null, cat.textColor || null, () => document.getElementById("editCatName").value || cat.name);
   document.getElementById("editCatCancel").addEventListener("click", closeModal);
   document.getElementById("editCatConfirm").addEventListener("click", () => {
     const name = document.getElementById("editCatName").value.trim();
     if (!name) return;
     cat.name = name;
+    // Sin color elegido = se quita la clave (así vuelve al color normal).
+    if (colors.bg) cat.bgColor = colors.bg; else delete cat.bgColor;
+    if (colors.text) cat.textColor = colors.text; else delete cat.textColor;
     saveState(); closeModal(); renderCategoryAdminList();
   });
 }
@@ -3115,6 +3570,7 @@ function deleteCategory(catId){
     : `¿Seguro que quieres eliminar la categoría "${cat.name}"?`;
   openConfirmModal("Eliminar categoría", msg, () => {
     state.products = state.products.filter(p => p.categoryId !== catId);
+    state.subcategories = (state.subcategories || []).filter(sc => sc.categoryId !== catId);
     state.categories = state.categories.filter(c => c.id !== catId);
     saveState();
     renderCategoryAdminList();
@@ -3140,7 +3596,7 @@ function renderStockScreen(){
       row.className = "admin-prod-row";
       row.innerHTML = `
         <div class="admin-prod-info">
-          <span class="admin-prod-name">${p.name} ${!p.stockTracked ? '<span class="tag">Sin control</span>' : ''} ${low ? '<span class="tag danger">STOCK BAJO</span>' : ''}</span>
+          <span class="admin-prod-name">${p.name}${subcategoryName(p) ? ' <span class="tag">' + escapeHtml(subcategoryName(p)) + '</span>' : ''} ${!p.stockTracked ? '<span class="tag">Sin control</span>' : ''} ${low ? '<span class="tag danger">STOCK BAJO</span>' : ''}</span>
           <span class="admin-prod-meta">Stock actual: ${p.stock} · Stock mínimo: ${p.stockMin}</span>
         </div>
         <div class="admin-prod-actions">
@@ -3249,7 +3705,7 @@ function renderStockLowScreen(){
     row.innerHTML = `
       <div class="admin-prod-info">
         <span class="admin-prod-name">${p.name} <span class="tag danger">STOCK BAJO</span></span>
-        <span class="admin-prod-meta">${cat ? cat.name + " · " : ""}Stock actual: ${p.stock} · Stock mínimo: ${p.stockMin}</span>
+        <span class="admin-prod-meta">${cat ? cat.name + " · " : ""}${subcategoryName(p) ? subcategoryName(p) + " · " : ""}Stock actual: ${p.stock} · Stock mínimo: ${p.stockMin}</span>
       </div>
       <div class="admin-prod-actions">
         <button class="mini-btn" data-stock-add="${p.id}">Añadir</button>
@@ -3313,6 +3769,7 @@ function exportProductsXlsx(){
     const cat = state.categories.find(c => c.id === p.categoryId);
     const row = {
       "Categoría": cat ? cat.name : "",
+      "Subcategoría": subcategoryName(p),
       "Producto": p.name,
       "Precio": p.price,
       "Costo": p.cost || 0,
@@ -3407,6 +3864,7 @@ function handleImportFile(e){
       }
 
       const idxCat = headers.indexOf("categoria");
+      const idxSub = headers.indexOf("subcategoria");
       const idxProd = headers.indexOf("producto");
       const idxPrecio = headers.indexOf("precio");
       const idxCosto = headers.indexOf("costo");
@@ -3442,6 +3900,7 @@ function handleImportFile(e){
           return;
         }
         const catName = String(r[idxCat] || "Sin categoría").trim() || "Sin categoría";
+        const subName = idxSub >= 0 ? String(r[idxSub] || "").trim() : null; // null = el archivo no trae la columna
         const cost = idxCosto >= 0 ? (parseFloat(r[idxCosto]) || 0) : 0;
         const hidden = idxOculto >= 0 ? isAffirmative(r[idxOculto]) : false;
         const stock = idxStock >= 0 ? Math.max(0, parseInt(r[idxStock], 10) || 0) : 0;
@@ -3463,7 +3922,7 @@ function handleImportFile(e){
             questions.push({ id: uid("q"), text, options });
           });
         }
-        parsedRows.push({ catName, prodName, price, cost, hidden, stock, stockMin, stockTracked, advanced, questions, kitchen });
+        parsedRows.push({ catName, subName, prodName, price, cost, hidden, stock, stockMin, stockTracked, advanced, questions, kitchen });
       }
 
       const catCount = new Set(parsedRows.map(r => r.catName.toLowerCase())).size;
@@ -3499,7 +3958,8 @@ function showImportPreview(parsedRows, catCount){
 function applyImport(parsedRows){
   parsedRows.forEach(r => {
     const cat = findOrCreateCategory(r.catName);
-    findOrCreateProduct(r.prodName, cat.id, r.price, r.cost, r.hidden, r.stock, r.stockMin, r.stockTracked, r.advanced, r.questions, r.kitchen);
+    const sub = r.subName ? findOrCreateSubcategory(cat.id, r.subName) : null;
+    findOrCreateProduct(r.prodName, cat.id, sub ? sub.id : (r.subName === null ? undefined : ""), r.price, r.cost, r.hidden, r.stock, r.stockMin, r.stockTracked, r.advanced, r.questions, r.kitchen);
   });
   saveState();
 }
@@ -3516,8 +3976,20 @@ function findOrCreateCategory(name){
 // El stock importado se SUMA al stock actual de un producto ya existente
 // (no lo reemplaza); el resto de los datos (precio, costo, oculto, stock
 // mínimo, control de stock, opciones avanzadas) se actualiza con lo que trae el Excel.
-function findOrCreateProduct(name, categoryId, price, cost, hidden, stock, stockMin, stockTracked, advanced, questions, kitchen){
-  let prod = state.products.find(p => p.categoryId === categoryId && p.name.trim().toLowerCase() === name.trim().toLowerCase());
+function findOrCreateSubcategory(categoryId, name){
+  if (!Array.isArray(state.subcategories)) state.subcategories = [];
+  let sub = state.subcategories.find(sc => sc.categoryId === categoryId && sc.name.trim().toLowerCase() === name.trim().toLowerCase());
+  if (!sub){
+    sub = { id: uid("sc"), name: name.trim(), categoryId };
+    state.subcategories.push(sub);
+  }
+  return sub;
+}
+
+// subId: undefined = el Excel no traía columna "Subcategoría" (no se toca la
+// subcategoría de un producto existente); "" = sin subcategoría.
+function findOrCreateProduct(name, categoryId, subId, price, cost, hidden, stock, stockMin, stockTracked, advanced, questions, kitchen){
+  let prod = state.products.find(p => p.categoryId === categoryId && (subId === undefined || (p.subcategoryId || "") === subId) && p.name.trim().toLowerCase() === name.trim().toLowerCase());
   if (prod){
     prod.price = price;
     prod.cost = cost;
@@ -3529,9 +4001,9 @@ function findOrCreateProduct(name, categoryId, price, cost, hidden, stock, stock
     prod.questions = questions || [];
     prod.kitchen = !!kitchen;
   } else {
-    const maxOrder = productsInCategory(categoryId).reduce((m,p) => Math.max(m, p.order||0), -1);
+    const maxOrder = productsInGroup(categoryId, subId || "").reduce((m,p) => Math.max(m, p.order||0), -1);
     prod = {
-      id: uid("p"), name: name.trim(), price, cost, categoryId, hidden,
+      id: uid("p"), name: name.trim(), price, cost, categoryId, subcategoryId: subId || "", hidden,
       order: maxOrder + 1,
       stock: stock || 0, stockMin: stockMin || 0, stockTracked: !!stockTracked,
       advanced: !!advanced, questions: questions || [], kitchen: !!kitchen
@@ -3619,10 +4091,34 @@ function openAdvancedConfigScreen(){
       </p>
       <button class="btn-primary" id="btnForceResync" style="width:fit-content;">Forzar resincronización completa</button>
     </div>
+    <div class="settings-block" style="max-width:100%; margin-top:16px;">
+      <label>Tamaño de los datos compartidos</label>
+      <p class="muted" style="font-size:.85rem; margin-bottom:8px;">
+        Cada vez que un dispositivo abre o recarga el sistema, descarga estos datos de la nube.
+        Sirve para ver qué parte pesa más y cuidar el límite gratuito de Firebase.
+      </p>
+      <div id="dataSizeInfo" class="muted" style="font-size:.9rem;"></div>
+    </div>
     <div class="modal-actions" style="margin-top:20px;">
       <button class="modal-confirm" id="advConfigClose" style="flex:1;">Cerrar</button>
     </div>
   `);
+  (function renderDataSize(){
+    const kb = (v) => (JSON.stringify(v === undefined ? null : v).length / 1024).toFixed(1) + " KB";
+    const meta = buildMetaObject();
+    const logoLen = (state.theme && state.theme.logoDataUrl) ? state.theme.logoDataUrl.length : 0;
+    const rows = [
+      ["Productos (" + state.products.length + ")", kb(state.products)],
+      ["Ventas de la jornada abierta (" + state.sales.length + ")", kb(state.sales)],
+      ["Movimientos de caja (" + (state.cashMovements || []).length + ")", kb(state.cashMovements)],
+      ["Cierres anteriores (" + state.cashClosures.length + ")", kb(state.cashClosures)],
+      ["Ventas en espera (" + state.pendingSales.length + ")", kb(state.pendingSales)],
+      ["Categorías, tema y configuración", kb(meta)],
+      ["   de eso, el logo", (logoLen / 1024).toFixed(1) + " KB"]
+    ];
+    const total = (JSON.stringify({ p: state.products, s: state.sales, m: state.cashMovements, c: state.cashClosures, ps: state.pendingSales, meta }).length / 1024).toFixed(1);
+    document.getElementById("dataSizeInfo").innerHTML = rows.map(r => `<div class="pay-line"><span>${r[0]}</span><span>${r[1]}</span></div>`).join("") + `<div class="pay-line highlight"><span>Total por apertura</span><span>${total} KB</span></div>`;
+  })();
   document.getElementById("advConfigClose").addEventListener("click", closeModal);
   document.getElementById("btnConfigDeletePassword").addEventListener("click", openChangeDeletePasswordModal);
   document.getElementById("btnForceResync").addEventListener("click", () => {
@@ -3772,9 +4268,33 @@ document.getElementById("logoInput").addEventListener("change", (e) => {
   }
   const reader = new FileReader();
   reader.onload = (evt) => {
-    state.theme.logoDataUrl = evt.target.result;
-    saveState();
-    applyTheme();
+    // El logo viaja dentro de los datos compartidos y lo descarga CADA
+    // dispositivo en CADA apertura: se reduce a un máximo de 256 px (más que
+    // suficiente para un logo) para que no pese cientos de KB.
+    const original = evt.target.result;
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const maxSide = 256;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        const small = canvas.toDataURL("image/png");
+        state.theme.logoDataUrl = small.length < original.length ? small : original;
+      } catch (err){
+        state.theme.logoDataUrl = original;
+      }
+      saveState();
+      applyTheme();
+    };
+    img.onerror = () => {
+      state.theme.logoDataUrl = original;
+      saveState();
+      applyTheme();
+    };
+    img.src = original;
   };
   reader.readAsDataURL(file);
 });
@@ -3985,7 +4505,7 @@ function renderVisProductList(catId){
     btn.className = "visibility-row" + (p.hidden ? " is-hidden" : "");
     // El stock solo se muestra si ese producto tiene su control de stock activado.
     btn.innerHTML = `
-      <span class="visibility-name">${p.name} — Bs ${p.price.toFixed(2)}${p.stockTracked ? " · Stock: " + p.stock : ""}</span>
+      <span class="visibility-name">${p.name}${subcategoryName(p) ? " [" + subcategoryName(p) + "]" : ""} — Bs ${p.price.toFixed(2)}${p.stockTracked ? " · Stock: " + p.stock : ""}</span>
       ${p.hidden ? '<span class="tag danger">OCULTADO</span>' : '<span class="mini-btn">Ocultar</span>'}
     `;
     btn.addEventListener("click", () => {
@@ -4171,49 +4691,25 @@ async function startApp(){
       // en datos móviles), no se deja trabada la pantalla de arranque — se
       // sigue con lo que haya localmente y el listener en tiempo real (más
       // abajo) se encarga de traer lo que falte apenas pueda conectar.
-      const snap = await Promise.race([
-        fbRootRef.once("value"),
+      const firstSync = new Promise((resolve) => { firstSyncResolve = resolve; });
+      attachFirebaseListener();
+      await Promise.race([
+        firstSync,
         new Promise((_, reject) => setTimeout(() => reject(new Error("Tiempo de espera agotado conectando con Firebase")), 8000))
       ]);
-      const remote = snap.val();
-      if (remote){
-        // loadLocalOrSeed() (llamado al principio de startApp) ya cargó
-        // "lastSyncSnapshot" desde la casilla combinada de este dispositivo,
-        // si existía. Si "meta" sigue en null, es la marca de que este
-        // dispositivo nunca sincronizó antes (o es la primera vez que se
-        // usa).
-        if (!lastSyncSnapshot || lastSyncSnapshot.meta === null){
-          // BUG REAL CORREGIDO AQUÍ: antes, en este caso, se "sembraba"
-          // lastSyncSnapshot = remoto y DESPUÉS se llamaba a la fusión
-          // normal (applyRemoteSnapshot), comparando local contra ese
-          // remoto recién copiado. El problema: para cualquier producto
-          // (o venta, cierre, etc.) que existiera en Firebase pero NO en
-          // los datos viejos/locales de este dispositivo, la fusión veía
-          // "localmente no lo tengo, pero 'lo último confirmado' dice que
-          // sí" y lo trataba como un presunto BORRADO LOCAL pendiente de
-          // confirmar — descartándolo del todo. Resultado: el dispositivo
-          // se quedaba solo con la intersección de lo viejo que ya tenía,
-          // perdiendo silenciosamente todo lo demás de Firebase (72
-          // productos reducidos a los pocos que coincidían) — y encima
-          // "lastSyncSnapshot" seguía marcando esos productos perdidos
-          // como "confirmados", así que el próximo envío de este
-          // dispositivo los habría mandado a BORRAR en Firebase para
-          // todos. Por eso un dispositivo con caché viejo podía mostrar
-          // "sincronizado" y aun así quedarse pegado en datos antiguos.
-          //
-          // La solución: cuando no hay nada propio confirmado todavía, no
-          // tiene sentido "comparar" nada — se adopta Firebase tal cual,
-          // de forma directa, sin pasar por la lógica de pendientes.
-          adoptRemoteDirectly(remote);
-        } else {
-          applyRemoteSnapshot(remote);
-        }
+      const remote = assembleRemote();
+      const hasRemote = Object.keys(remote).length > 0;
+      if (hasRemote){
+        // Si "meta" sigue en null en lastSyncSnapshot, este dispositivo nunca
+        // sincronizó antes: adopta la nube tal cual (ver adoptRemoteDirectly,
+        // que explica el bug real que esto evita). Si no, fusiona.
+        applyRemoteOrAdopt(remote);
         applyTheme();
         goToLanding();
         updateNewSaleLock();
       }
       setFbStatus("ok");
-      if (!remote){
+      if (!hasRemote){
         // Primera vez que se conecta esta base de Firebase: sube los datos locales.
         pushStateToFirebase();
       }
@@ -4229,7 +4725,8 @@ async function startApp(){
     // sesión (por ejemplo, no se enteraba de un cierre/apertura de caja
     // hecho desde otro dispositivo) hasta recargar la página entera.
     appStarted = true;
-    attachFirebaseListener();
+    attachFirebaseListener(); // (ya enganchado arriba; no hace nada si ya existe)
+    if (fbStatus === "ok") setTimeout(archiveOldJornadaData, 1500);
   } else {
     appStarted = true;
     setFbStatus("error");
