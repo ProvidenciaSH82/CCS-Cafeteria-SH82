@@ -1202,7 +1202,12 @@ function updateNewSaleLock(){
 
 document.getElementById("btnEnterCajero").addEventListener("click", enterCajero);
 document.getElementById("btnEnterEntrega").addEventListener("click", enterEntrega);
-document.getElementById("btnEnterConfigGeneral").addEventListener("click", enterConfigGeneral);
+// Entrar a la Configuración de la pantalla de inicio pide contraseña (la misma
+// de "Configuración avanzada"), para que cualquiera no pueda cambiar nombre,
+// logo, colores ni dispositivos.
+document.getElementById("btnEnterConfigGeneral").addEventListener("click", () => {
+  promptPassword("Configuración", "Ingresa la contraseña para entrar a la configuración.", () => state.advancedConfigPassword, enterConfigGeneral);
+});
 
 // ---------- NAVEGACIÓN INTERNA (dentro de un área) ----------
 function switchView(viewName){
