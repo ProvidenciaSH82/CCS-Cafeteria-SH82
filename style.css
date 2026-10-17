@@ -506,3 +506,7 @@ input{font-family:inherit;}
 .debt-tag.pendiente{background:#b71c1c; color:#fff;}
 .debt-tag.parcial{background:#f9a825; color:#000;}
 .debt-tag.pagada{background:#2e7d32; color:#fff;}
+
+/* Iconos de contraseñas y deuda anulada */
+.pw-icon{font-size:1.15em; margin-left:4px;}
+.debt-tag.anulada{background:#616161; color:#fff;}

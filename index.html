@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-title" id="appTitleMeta" content="POS Shalom">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=202610160700">
+<link rel="stylesheet" href="style.css?v=202610162330">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
@@ -294,10 +294,6 @@
           <button class="btn-primary" id="btnAddGridSize" style="margin-top:12px; width:fit-content;">+ Agregar tamaño</button>
         </div>
 
-        <div class="settings-block" style="margin-top:28px; max-width:520px;">
-          <label>Opciones avanzadas</label>
-          <button class="btn-ghost" id="btnAdvancedConfig" style="width:fit-content;">Configuración avanzada</button>
-        </div>
       </section>
 
       <!-- ---------- CONFIGURACIÓN GENERAL (pantalla principal) ---------- -->
@@ -336,15 +332,61 @@
             <button class="btn-ghost" id="btnResetTheme" style="width:fit-content;">Restablecer por defecto</button>
           </div>
         </div>
+      </section>
 
-        <div class="settings-block" style="margin-top:26px; max-width:620px;">
-          <label>Identificador de dispositivos</label>
-          <p class="muted" style="font-size:.8rem; margin-top:4px;">Ponle un nombre a cada dispositivo que entra al sistema. Si lo activas, el Historial de ventas muestra "Vendedor: nombre" en cada venta. Si lo desactivas, no se muestra nada.</p>
+      <!-- ---------- IDENTIFICADOR DE DISPOSITIVOS ---------- -->
+      <section class="view" id="view-config-devices">
+        <header class="view-header">
+          <h1>Identificador de dispositivos</h1>
+        </header>
+        <div class="settings-block" style="max-width:620px;">
+                    <p class="muted" style="font-size:.8rem; margin-top:4px;">Ponle un nombre a cada dispositivo que entra al sistema. Si lo activas, el Historial de ventas muestra "Vendedor: nombre" en cada venta. Si lo desactivas, no se muestra nada.</p>
           <div class="toggle-pair" style="max-width:300px;">
             <button type="button" id="devNamesOn">Activado</button>
             <button type="button" id="devNamesOff">Desactivado</button>
           </div>
           <div id="devList" style="margin-top:14px;"></div>
+        </div>
+      </section>
+
+      <!-- ---------- CONFIGURACIÓN AVANZADA ---------- -->
+      <section class="view" id="view-config-advanced">
+        <header class="view-header">
+          <h1>Configuración avanzada</h1>
+        </header>
+
+        <div class="settings-block" style="max-width:620px;">
+          <label>Contraseña de configuración <span class="pw-icon">⚠️</span></label>
+          <p class="muted" style="font-size:.85rem; margin-bottom:8px;">Se pide para entrar a Configuración y para anular una deuda.</p>
+          <button class="btn-primary" id="btnConfigMainPassword" style="width:fit-content;">Configurar</button>
+        </div>
+        <div class="settings-block" style="max-width:620px; margin-top:16px;">
+          <label>Contraseña de eliminaciones <span class="pw-icon">🚫</span></label>
+          <p class="muted" style="font-size:.85rem; margin-bottom:8px;">Protege la eliminación de ventas, cierres de caja y movimientos de dinero.</p>
+          <button class="btn-primary" id="btnConfigDeletePassword" style="width:fit-content;">Configurar</button>
+        </div>
+        <div class="settings-block" style="max-width:620px; margin-top:16px;">
+          <label>Contraseña de deudas <span class="pw-icon">❗</span></label>
+          <p class="muted" style="font-size:.85rem; margin-bottom:8px;">Se pide al guardar una venta a deuda.</p>
+          <button class="btn-primary" id="btnConfigDebtPassword" style="width:fit-content;">Configurar</button>
+        </div>
+        <div class="settings-block" style="max-width:620px; margin-top:16px;">
+          <label>Forzar resincronización completa</label>
+          <p class="muted" style="font-size:.85rem; margin-bottom:8px;">
+            Úsalo SOLO desde el dispositivo que tenga la información más completa y correcta
+            (todos los productos, todo el historial). Vuelve a subir absolutamente todo lo de
+            este dispositivo a la nube, sin borrar nada de lo que tengan los demás — sirve para
+            poner a todos de acuerdo cuando algunos dispositivos quedaron con listas distintas.
+          </p>
+          <button class="btn-primary" id="btnForceResync" style="width:fit-content;">Forzar resincronización completa</button>
+        </div>
+        <div class="settings-block" style="max-width:620px; margin-top:16px;">
+          <label>Tamaño de los datos compartidos</label>
+          <p class="muted" style="font-size:.85rem; margin-bottom:8px;">
+            Cada vez que un dispositivo abre o recarga el sistema, descarga estos datos de la nube.
+            Sirve para ver qué parte pesa más y cuidar el límite gratuito de Firebase.
+          </p>
+          <div id="dataSizeInfo" class="muted" style="font-size:.9rem;"></div>
         </div>
       </section>
 
@@ -420,6 +462,6 @@
 
   <div class="toast" id="posToast"></div>
 
-  <script src="app.js?v=202610160700"></script>
+  <script src="app.js?v=202610162330"></script>
 </body>
 </html>

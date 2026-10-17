@@ -1251,7 +1251,10 @@ const ENTREGA_NAV = [
   { view: "visibility", icon: "👁", label: "Ocultar / Visualizar" }
 ];
 const CONFIG_NAV = [
-  { action: "landing", icon: "⌂", label: "Inicio" }
+  { action: "landing", icon: "⌂", label: "Inicio" },
+  { view: "config-general", icon: "🎨", label: "Configuración general" },
+  { view: "config-devices", icon: "📱", label: "Identificador de dispositivos" },
+  { view: "config-advanced", icon: "🔒", label: "Configuración avanzada" }
 ];
 
 function goToLanding(){
@@ -1331,7 +1334,7 @@ document.getElementById("btnEnterEntrega").addEventListener("click", enterEntreg
 // de "Configuración avanzada"), para que cualquiera no pueda cambiar nombre,
 // logo, colores ni dispositivos.
 document.getElementById("btnEnterConfigGeneral").addEventListener("click", () => {
-  promptPassword("Configuración", "Ingresa la contraseña para entrar a la configuración.", () => state.advancedConfigPassword, enterConfigGeneral);
+  promptPassword("Configuración", "Ingresa la contraseña para entrar a la configuración.", () => state.advancedConfigPassword, enterConfigGeneral, { icon: PW_ICON.config });
 });
 
 // ---------- NAVEGACIÓN INTERNA (dentro de un área) ----------
@@ -1349,6 +1352,8 @@ function switchView(viewName){
   if (viewName === "cashregister") renderCashRegisterView();
   if (viewName === "settings") renderCajeroSettings();
   if (viewName === "config-general") renderConfigGeneral();
+  if (viewName === "config-devices") renderConfigGeneral();
+  if (viewName === "config-advanced") renderConfigAdvanced();
   if (viewName === "pedidos") renderPedidos();
   if (viewName === "productospendientes") renderProductosPendientes();
   if (viewName === "cocina") renderCocina();
@@ -1487,7 +1492,7 @@ function renderResumenDia(){
   document.getElementById("statTotal").textContent = "Bs " + total.toFixed(2);
   document.getElementById("statCash").textContent = "Bs " + cash.toFixed(2);
   document.getElementById("statQr").textContent = "Bs " + qr.toFixed(2);
-  const onDebtToday = jornadaSales.reduce((a,s) => a + (s.debt ? Math.max(0, s.total - (s.cash||0) - (s.qr||0)) : 0), 0);
+  const onDebtToday = jornadaSales.reduce((a,s) => a + saleDebtAmount(s), 0);
   const debtCollectedToday = getCurrentJornadaDebtPayments().reduce((a,p) => a + (p.amount || 0), 0);
   document.getElementById("statOnDebt").textContent = "Bs " + onDebtToday.toFixed(2);
   document.getElementById("statDebtCollected").textContent = "Bs " + debtCollectedToday.toFixed(2);
@@ -1684,7 +1689,7 @@ function computeTotals(sales){
   const cash = sales.reduce((a,s) => a + (s.cash || 0), 0);
   const qr = sales.reduce((a,s) => a + (s.qr || 0), 0);
   const mixto = sales.filter(s => s.method === "mixto").reduce((a,s) => a + s.total, 0);
-  const onDebt = sales.reduce((a,s) => a + (s.debt ? Math.max(0, Math.round((s.total - (s.cash||0) - (s.qr||0)) * 100) / 100) : 0), 0);
+  const onDebt = sales.reduce((a,s) => a + saleDebtAmount(s), 0);
   const salesCount = sales.length;
   const productsCount = sales.reduce((a,s) => a + s.items.reduce((b,i) => b + i.qty, 0), 0);
   return { total, cash, qr, mixto, onDebt, salesCount, productsCount };
@@ -3127,12 +3132,14 @@ function computeDebtorLedger(debtorId){
   let pool = round2(payments.reduce((a, p) => a + (p.amount || 0), 0));
   const purchases = sales.map(sale => {
     const initial = round2((sale.cash || 0) + (sale.qr || 0));
-    const owed = Math.max(0, round2(sale.total - initial));
+    const forgiven = sale.debtCancel ? round2(sale.debtCancel.forgiven || 0) : 0;
+    const owed = Math.max(0, round2(sale.total - initial - forgiven));
     const allocated = Math.min(owed, pool);
     pool = round2(pool - allocated);
-    const remaining = round2(owed - allocated);
-    const status = remaining <= 0.004 ? "pagada" : (allocated > 0.004 ? "parcial" : "pendiente");
-    return { sale, initial, owed, allocated, remaining, status };
+    const cancelled = !!sale.debtCancel;
+    const remaining = cancelled ? 0 : round2(owed - allocated);
+    const status = cancelled ? "anulada" : (remaining <= 0.004 ? "pagada" : (allocated > 0.004 ? "parcial" : "pendiente"));
+    return { sale, initial, owed, allocated, remaining, status, forgiven, cancelled };
   });
   const balance = round2(purchases.reduce((a, p) => a + p.remaining, 0));
   return { purchases, payments, balance };
@@ -3143,7 +3150,13 @@ function deviceNameOf(obj){
   const dev = (state.devices || []).find(d => d.id === obj.deviceId);
   return dev && dev.name ? dev.name : "";
 }
-const STATUS_LABEL = { pagada: "PAGADA", parcial: "PARCIAL", pendiente: "PENDIENTE" };
+const STATUS_LABEL = { pagada: "PAGADA", parcial: "PARCIAL", pendiente: "PENDIENTE", anulada: "DEUDA ANULADA" };
+// Lo que quedó a deuda de una venta (descontando lo que se anuló después).
+function saleDebtAmount(s){
+  if (!s.debt) return 0;
+  const forgiven = s.debtCancel ? (s.debtCancel.forgiven || 0) : 0;
+  return Math.max(0, round2(s.total - (s.cash || 0) - (s.qr || 0) - forgiven));
+}
 
 // --- Botón "Venta a deuda" en Nueva venta ---
 document.getElementById("btnDebtSale").addEventListener("click", () => {
@@ -3229,7 +3242,7 @@ function openDebtSaleModal(total, draft){
       }
       if (!debtor) return;
       finalizeSale(debtor.name, "deuda", cash, qr, { debtorId: debtor.id, debtorName: debtor.name });
-    }, { numeric: true, onCancel: () => openDebtSaleModal(total, draftNow) });
+    }, { numeric: true, icon: PW_ICON.debt, onCancel: () => openDebtSaleModal(total, draftNow) });
   });
 }
 
@@ -3370,13 +3383,14 @@ function renderDebtDetail(){
       <span class="hmeta" style="color:var(--text); flex:1; min-width:150px;">
         <strong>${dt.toLocaleDateString()} ${dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</strong>
         <span class="tag debt-tag ${p.status}">${STATUS_LABEL[p.status]}</span><br>
-        <span class="muted" style="font-size:.82rem;">Total Bs ${p.sale.total.toFixed(2)} · Pago inicial Bs ${p.initial.toFixed(2)} · Abonado después Bs ${p.allocated.toFixed(2)}</span>
+        <span class="muted" style="font-size:.82rem;">Total Bs ${p.sale.total.toFixed(2)} · Pago inicial Bs ${p.initial.toFixed(2)} · Abonado después Bs ${p.allocated.toFixed(2)}${p.cancelled ? " · Deuda anulada Bs " + p.forgiven.toFixed(2) : ""}</span>
       </span>
-      <span class="htotal" style="width:auto; color:${p.remaining > 0.004 ? "var(--danger)" : "var(--accent)"};">${p.remaining > 0.004 ? "Falta Bs " + p.remaining.toFixed(2) : "Pagada"}</span>
-      <div class="hactions"><button class="mini-btn" data-debt-sale="${escapeHtml(p.sale.id)}">Ver</button></div>`;
+      <span class="htotal" style="width:auto; color:${p.remaining > 0.004 ? "var(--danger)" : "var(--accent)"};">${p.cancelled ? "Anulada" : (p.remaining > 0.004 ? "Falta Bs " + p.remaining.toFixed(2) : "Pagada")}</span>
+      <div class="hactions"><button class="mini-btn" data-debt-sale="${escapeHtml(p.sale.id)}">Ver</button>${p.cancelled || p.remaining <= 0.004 ? "" : `<button class="mini-btn danger" data-debt-cancel="${escapeHtml(p.sale.id)}">Anular</button>`}</div>`;
     list.appendChild(row);
   });
   list.querySelectorAll("[data-debt-sale]").forEach(b => b.addEventListener("click", () => showDebtPurchaseModal(b.dataset.debtSale)));
+  list.querySelectorAll("[data-debt-cancel]").forEach(b => b.addEventListener("click", () => cancelDebtPurchase(b.dataset.debtCancel)));
 
   const plist = document.getElementById("debtPaymentsList");
   plist.innerHTML = "";
@@ -3411,10 +3425,34 @@ function showDebtPurchaseModal(saleId){
     <div class="pay-line"><span>Pago inicial por QR</span><span>Bs ${(sale.qr || 0).toFixed(2)}</span></div>
     <div class="pay-line"><span>Deuda ese día</span><span>Bs ${(entry ? entry.owed : 0).toFixed(2)}</span></div>
     <div class="pay-line"><span>Abonado después</span><span>Bs ${(entry ? entry.allocated : 0).toFixed(2)}</span></div>
+    ${entry && entry.cancelled ? `<div class="pay-line"><span>Deuda anulada (pagada por otra vía)</span><span>Bs ${entry.forgiven.toFixed(2)}</span></div>` : ""}
     <div class="pay-line highlight"><span>Falta pagar</span><span>Bs ${(entry ? entry.remaining : 0).toFixed(2)}</span></div>
     <div class="modal-actions"><button class="modal-confirm" id="closeDebtPurchase" style="flex:1;">Cerrar</button></div>
   `);
   document.getElementById("closeDebtPurchase").addEventListener("click", closeModal);
+}
+
+// Anular la deuda de una compra (ej.: el cliente ya pagó por otra vía otro día).
+// NO devuelve stock ni toca la caja: solo deja de cobrarse lo que faltaba.
+// Pide la contraseña de Configuración (⚠️).
+function cancelDebtPurchase(saleId){
+  const sale = state.sales.find(x => x.id === saleId);
+  if (!sale || !sale.debt) return;
+  const entry = computeDebtorLedger(sale.debt.debtorId).purchases.find(p => p.sale.id === saleId);
+  if (!entry || entry.cancelled || entry.remaining <= 0.004) return;
+  promptPassword("Anular deuda", "Ingresa la contraseña de configuración para anular lo que falta pagar de esta compra.", () => state.advancedConfigPassword, () => {
+    openConfirmModal("Anular deuda",
+      `Se anulará lo que falta pagar de esta compra (Bs ${entry.remaining.toFixed(2)}). No se devuelve stock ni se mueve la caja. ¿Continuar?`,
+      () => {
+        const fresh = state.sales.find(x => x.id === saleId);
+        if (!fresh) return;
+        const e2 = computeDebtorLedger(fresh.debt.debtorId).purchases.find(p => p.sale.id === saleId);
+        fresh.debtCancel = { date: new Date().toISOString(), forgiven: e2 ? e2.remaining : entry.remaining, deviceId: getDeviceId() };
+        saveState();
+        showToast("Deuda anulada");
+        if (document.getElementById("view-debtdetail").classList.contains("active")) renderDebtDetail();
+      }, true, { confirm: "Sí, anular deuda" });
+  }, { icon: PW_ICON.config });
 }
 
 // Cobro de una deuda: efectivo y/o QR (puede ser mixto), nunca más de lo que debe.
@@ -4790,10 +4828,11 @@ document.getElementById("stockOff").addEventListener("click", () => {
 
 // ---------- CONTRASEÑAS (Configuración avanzada / eliminaciones) ----------
 // Prompt genérico de contraseña: compara sin distinguir mayúsculas/minúsculas.
+const PW_ICON = { config: "⚠️", delete: "🚫", debt: "❗" };
 function promptPassword(title, message, getExpectedPassword, onSuccess, opts){
   opts = opts || {};
   showModal(`
-    <h2>${title}</h2>
+    <h2>${title}${opts.icon ? ` <span class="pw-icon">${opts.icon}</span>` : ""}</h2>
     <p class="muted" style="margin-bottom:10px;">${message}</p>
     <label>Contraseña</label>
     <input type="password" id="pwInput" placeholder="••••" ${opts.numeric ? 'inputmode="numeric" pattern="[0-9]*" autocomplete="off"' : ""}>
@@ -4822,48 +4861,11 @@ function promptPassword(title, message, getExpectedPassword, onSuccess, opts){
 
 // Usada antes de eliminar una venta, un cierre de caja o un movimiento de dinero.
 function requireDeletePassword(onSuccess){
-  promptPassword("Contraseña requerida", "Ingresa la contraseña de eliminaciones para continuar.", () => state.deletePassword, onSuccess, { numeric: true });
+  promptPassword("Contraseña requerida", "Ingresa la contraseña de eliminaciones para continuar.", () => state.deletePassword, onSuccess, { numeric: true, icon: PW_ICON.delete });
 }
 
-document.getElementById("btnAdvancedConfig").addEventListener("click", () => {
-  promptPassword("Configuración avanzada", "Ingresa la contraseña para continuar.", () => state.advancedConfigPassword, openAdvancedConfigScreen);
-});
-
-function openAdvancedConfigScreen(){
-  showModal(`
-    <h2>Configuración avanzada</h2>
-    <div class="settings-block" style="max-width:100%;">
-      <label>Contraseña de eliminaciones</label>
-      <p class="muted" style="font-size:.85rem; margin-bottom:8px;">Protege la eliminación de ventas, cierres de caja y movimientos de dinero.</p>
-      <button class="btn-primary" id="btnConfigDeletePassword" style="width:fit-content;">Configurar</button>
-    </div>
-    <div class="settings-block" style="max-width:100%; margin-top:16px;">
-      <label>Contraseña de deudas</label>
-      <p class="muted" style="font-size:.85rem; margin-bottom:8px;">Se pide al guardar una venta a deuda.</p>
-      <button class="btn-primary" id="btnConfigDebtPassword" style="width:fit-content;">Configurar</button>
-    </div>
-    <div class="settings-block" style="max-width:100%; margin-top:16px;">
-      <label>Forzar resincronización completa</label>
-      <p class="muted" style="font-size:.85rem; margin-bottom:8px;">
-        Úsalo SOLO desde el dispositivo que tenga la información más completa y correcta
-        (todos los productos, todo el historial). Vuelve a subir absolutamente todo lo de
-        este dispositivo a la nube, sin borrar nada de lo que tengan los demás — sirve para
-        poner a todos de acuerdo cuando algunos dispositivos quedaron con listas distintas.
-      </p>
-      <button class="btn-primary" id="btnForceResync" style="width:fit-content;">Forzar resincronización completa</button>
-    </div>
-    <div class="settings-block" style="max-width:100%; margin-top:16px;">
-      <label>Tamaño de los datos compartidos</label>
-      <p class="muted" style="font-size:.85rem; margin-bottom:8px;">
-        Cada vez que un dispositivo abre o recarga el sistema, descarga estos datos de la nube.
-        Sirve para ver qué parte pesa más y cuidar el límite gratuito de Firebase.
-      </p>
-      <div id="dataSizeInfo" class="muted" style="font-size:.9rem;"></div>
-    </div>
-    <div class="modal-actions" style="margin-top:20px;">
-      <button class="modal-confirm" id="advConfigClose" style="flex:1;">Cerrar</button>
-    </div>
-  `);
+// Pantalla "Configuración avanzada" (dentro de Configuración, con contraseña).
+function renderConfigAdvanced(){
   (function renderDataSize(){
     const kb = (v) => (JSON.stringify(v === undefined ? null : v).length / 1024).toFixed(1) + " KB";
     const meta = buildMetaObject();
@@ -4881,9 +4883,11 @@ function openAdvancedConfigScreen(){
     const total = (JSON.stringify({ p: state.products, s: state.sales, m: state.cashMovements, c: state.cashClosures, ps: state.pendingSales, meta }).length / 1024).toFixed(1);
     document.getElementById("dataSizeInfo").innerHTML = rows.map(r => `<div class="pay-line"><span>${r[0]}</span><span>${r[1]}</span></div>`).join("") + `<div class="pay-line highlight"><span>Total por apertura</span><span>${total} KB</span></div>`;
   })();
-  document.getElementById("advConfigClose").addEventListener("click", closeModal);
-  document.getElementById("btnConfigDeletePassword").addEventListener("click", openChangeDeletePasswordModal);
-  document.getElementById("btnConfigDebtPassword").addEventListener("click", openChangeDebtPasswordModal);
+}
+document.getElementById("btnConfigMainPassword").addEventListener("click", openChangeMainPasswordModal);
+document.getElementById("btnConfigDeletePassword").addEventListener("click", openChangeDeletePasswordModal);
+document.getElementById("btnConfigDebtPassword").addEventListener("click", openChangeDebtPasswordModal);
+{
   document.getElementById("btnForceResync").addEventListener("click", () => {
     openConfirmModal(
       "Forzar resincronización completa",
@@ -4912,30 +4916,38 @@ function forceFullResync(){
 }
 
 // Cambio de una contraseña numérica (eliminaciones / deudas).
-function openChangeNumericPasswordModal(title, getCurrent, setNew, doneMsg){
+function openChangeNumericPasswordModal(title, getCurrent, setNew, doneMsg, icon, alpha){
+  const kb = alpha ? "" : 'inputmode="numeric" pattern="[0-9]*"';
   showModal(`
-    <h2>${title}</h2>
+    <h2>${title}${icon ? ` <span class="pw-icon">${icon}</span>` : ""}</h2>
     <label>Contraseña anterior</label>
-    <input type="password" id="oldPw" inputmode="numeric" pattern="[0-9]*" placeholder="••••">
-    <label>Nueva contraseña (solo números)</label>
-    <input type="password" id="newPw" inputmode="numeric" pattern="[0-9]*" placeholder="••••">
+    <input type="password" id="oldPw" ${kb} autocomplete="off" placeholder="••••">
+    <label>Nueva contraseña ${alpha ? "(letras y/o números, mínimo 4, sin espacios)" : "(solo números)"}</label>
+    <input type="password" id="newPw" ${kb} autocomplete="off" placeholder="••••">
     <p class="import-feedback" id="pwChangeError"></p>
     <div class="modal-actions">
       <button class="modal-cancel" id="pwChangeCancel">Cancelar</button>
       <button class="modal-confirm" id="pwChangeSave">Guardar</button>
     </div>
   `);
-  document.getElementById("pwChangeCancel").addEventListener("click", () => openAdvancedConfigScreen());
+  document.getElementById("pwChangeCancel").addEventListener("click", closeModal);
   document.getElementById("pwChangeSave").addEventListener("click", () => {
     const oldPw = document.getElementById("oldPw").value;
     const newPw = document.getElementById("newPw").value;
     const errorEl = document.getElementById("pwChangeError");
-    if (oldPw !== getCurrent()){
+    const oldOk = alpha ? oldPw.toLowerCase() === String(getCurrent()).toLowerCase() : oldPw === getCurrent();
+    if (!oldOk){
       errorEl.textContent = "La contraseña anterior no es correcta.";
       errorEl.className = "import-feedback error";
       return;
     }
-    if (newPw.length === 0 || !/^[0-9]+$/.test(newPw)){
+    if (alpha){
+      if (newPw.length < 4 || /\s/.test(newPw)){
+        errorEl.textContent = "La nueva contraseña debe tener al menos 4 caracteres y sin espacios.";
+        errorEl.className = "import-feedback error";
+        return;
+      }
+    } else if (newPw.length === 0 || !/^[0-9]+$/.test(newPw)){
       errorEl.textContent = "La nueva contraseña solo puede contener números.";
       errorEl.className = "import-feedback error";
       return;
@@ -4947,10 +4959,13 @@ function openChangeNumericPasswordModal(title, getCurrent, setNew, doneMsg){
   });
 }
 function openChangeDeletePasswordModal(){
-  openChangeNumericPasswordModal("Contraseña de eliminaciones", () => state.deletePassword, (v) => { state.deletePassword = v; }, "Contraseña de eliminaciones actualizada.");
+  openChangeNumericPasswordModal("Contraseña de eliminaciones", () => state.deletePassword, (v) => { state.deletePassword = v; }, "Contraseña de eliminaciones actualizada.", PW_ICON.delete);
+}
+function openChangeMainPasswordModal(){
+  openChangeNumericPasswordModal("Contraseña de configuración", () => state.advancedConfigPassword, (v) => { state.advancedConfigPassword = v; }, "Contraseña de configuración actualizada.", PW_ICON.config, true);
 }
 function openChangeDebtPasswordModal(){
-  openChangeNumericPasswordModal("Contraseña de deudas", () => state.debtPassword, (v) => { state.debtPassword = v; }, "Contraseña de deudas actualizada.");
+  openChangeNumericPasswordModal("Contraseña de deudas", () => state.debtPassword, (v) => { state.debtPassword = v; }, "Contraseña de deudas actualizada.", PW_ICON.debt);
 }
 
 function renderGridSizeSettings(){
