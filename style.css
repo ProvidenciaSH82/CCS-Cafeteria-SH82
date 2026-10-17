@@ -498,3 +498,11 @@ input{font-family:inherit;}
 .device-row{display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:10px; margin-bottom:8px; border:1px solid var(--border); border-radius:var(--radius); background:var(--panel);}
 .device-row .device-info{flex:1 1 100%;}
 .device-row .device-name{flex:1 1 160px; min-width:0;}
+
+/* Deudas */
+.debt-sale-btn{margin-top:14px; width:100%; font-size:.82rem; padding:8px; border:1px dashed var(--text-muted, #8a93a3); opacity:.85;}
+.debt-two-cols{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+.debt-tag{font-weight:800; font-size:.7rem; letter-spacing:.04em;}
+.debt-tag.pendiente{background:#b71c1c; color:#fff;}
+.debt-tag.parcial{background:#f9a825; color:#000;}
+.debt-tag.pagada{background:#2e7d32; color:#fff;}

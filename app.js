@@ -50,7 +50,7 @@ try {
 }
 let appStarted = false; // evita sincronizar antes de haber comparado con Firebase al arrancar
 let fbPushTimer = null;
-let lastSyncSnapshot = { products: {}, sales: {}, pendingSales: {}, cashMovements: {}, cashClosures: {}, meta: null };
+let lastSyncSnapshot = { products: {}, sales: {}, pendingSales: {}, cashMovements: {}, cashClosures: {}, debtors: {}, debtPayments: {}, meta: null };
 
 // Guarda en este dispositivo, en UNA SOLA casilla y de una sola vez, tanto
 // los datos (state) como el registro de qué se confirmó subido a Firebase
@@ -134,6 +134,9 @@ let state = {
   selectedGridSizeIndex: 0,
   cashRegister: null,   // { openedAt, initialAmount } — caja abierta actualmente, o null si está cerrada
   cashClosures: [],     // historial de cierres de caja
+  debtors: [],          // clientes con cuenta de deuda: { id, name (completo), phone, description, createdAt }
+  debtPayments: [],     // abonos/cobros de deudas: { id, debtorId, date, cash, qr, amount, deviceId }
+  debtPassword: "5432", // protege guardar una venta a deuda (solo números)
   cashMovements: [],    // entradas/salidas de dinero: { id, type:'entrada'|'salida', description, account:'efectivo'|'qr', amount, date, deleted, deletedAt }
   stockEnabled: false,  // interruptor general del sistema de stock
   theme: { bgColor: null, sidebarColor: null, accentColor: null, textColor: null, logoDataUrl: null, logoScale: 1 },
@@ -285,6 +288,13 @@ function applyDefaultsAndMigrations(){
   if (state.cashRegister === undefined) state.cashRegister = null;
   if (!state.cashClosures) state.cashClosures = [];
   if (!state.cashMovements) state.cashMovements = [];
+  if (!Array.isArray(state.debtors)) state.debtors = [];
+  if (!Array.isArray(state.debtPayments)) state.debtPayments = [];
+  if (!state.debtPassword) state.debtPassword = "5432";
+  if (lastSyncSnapshot){
+    if (!lastSyncSnapshot.debtors) lastSyncSnapshot.debtors = {};
+    if (!lastSyncSnapshot.debtPayments) lastSyncSnapshot.debtPayments = {};
+  }
   if (!state.advancedConfigPassword) state.advancedConfigPassword = "Shalom82";
   if (!state.deletePassword) state.deletePassword = "1234";
   if (state.stockEnabled === undefined) state.stockEnabled = false;
@@ -325,6 +335,9 @@ function seedData(){
   state.cashRegister = null;
   state.cashClosures = [];
   state.cashMovements = [];
+  state.debtors = [];
+  state.debtPayments = [];
+  state.debtPassword = "5432";
   state.stockEnabled = false;
   state.theme = { bgColor: null, sidebarColor: null, accentColor: null, textColor: null, logoDataUrl: null, logoScale: 1 };
   state.advancedConfigPassword = "Shalom82";
@@ -418,7 +431,8 @@ function buildMetaObject(){
     stockEnabled: state.stockEnabled,
     theme: state.theme,
     advancedConfigPassword: state.advancedConfigPassword,
-    deletePassword: state.deletePassword
+    deletePassword: state.deletePassword,
+    debtPassword: state.debtPassword
   };
 }
 
@@ -524,6 +538,7 @@ function nextJornadaNumberSafe(){
 
 function diffCollectionUpdates(basePath, currentArr, lastMap){
   const updates = {};
+  lastMap = lastMap || {};
   const currentMap = arrayToMapById(currentArr);
   Object.keys(currentMap).forEach(id => {
     const cur = currentMap[id];
@@ -592,10 +607,12 @@ function pushStateToFirebase(){
     const ps = diffCollectionUpdates("pendingSales", state.pendingSales, lastSyncSnapshot.pendingSales);
     const cm = diffCollectionUpdates("cashMovements", state.cashMovements, lastSyncSnapshot.cashMovements);
     const cc = diffCollectionUpdates("cashClosures", state.cashClosures, lastSyncSnapshot.cashClosures);
+    const dd = diffCollectionUpdates("debtors", state.debtors, lastSyncSnapshot.debtors);
+    const dp = diffCollectionUpdates("debtPayments", state.debtPayments, lastSyncSnapshot.debtPayments);
     const metaObj = buildMetaObject();
     const metaChanged = stableStringify(metaObj) !== stableStringify(lastSyncSnapshot.meta);
     const productUpdates = toFieldLevelProductUpdates(p.updates, lastSyncSnapshot.products);
-    const updates = Object.assign({}, productUpdates, s.updates, ps.updates, cm.updates, cc.updates);
+    const updates = Object.assign({}, productUpdates, s.updates, ps.updates, cm.updates, cc.updates, dd.updates, dp.updates);
     if (metaChanged){
       // Se escribe SOLO lo que cambió dentro de "meta" (p.ej. "meta/categories")
       // en vez de reemplazar todo el bloque: Firebase manda a los demás
@@ -621,7 +638,7 @@ function pushStateToFirebase(){
       // junto a deepClone(): una edición posterior en el mismo lugar (como
       // "cat.name = ...") ensuciaría el "confirmado" sin pasar por
       // Firebase. Por eso se clona antes de guardarlo como lastSyncSnapshot.
-      lastSyncSnapshot = { products: p.currentMap, sales: s.currentMap, pendingSales: ps.currentMap, cashMovements: cm.currentMap, cashClosures: cc.currentMap, meta: deepClone(metaObj) };
+      lastSyncSnapshot = { products: p.currentMap, sales: s.currentMap, pendingSales: ps.currentMap, cashMovements: cm.currentMap, cashClosures: cc.currentMap, debtors: dd.currentMap, debtPayments: dp.currentMap, meta: deepClone(metaObj) };
       normalizeSnapshotDefaults();
       persistSyncState();
       setFbStatus("ok");
@@ -877,6 +894,8 @@ function adoptRemoteDirectly(remote){
   state.pendingSales = remote.pendingSales ? deepClone(Object.values(remote.pendingSales)) : [];
   state.cashMovements = remote.cashMovements ? deepClone(Object.values(remote.cashMovements)) : [];
   state.cashClosures = remote.cashClosures ? deepClone(Object.values(remote.cashClosures)) : [];
+  state.debtors = remote.debtors ? deepClone(Object.values(remote.debtors)) : [];
+  state.debtPayments = remote.debtPayments ? deepClone(Object.values(remote.debtPayments)) : [];
   // Mismo riesgo que arriba, pero con "meta": decodeMetaFromFirebase() solo
   // copia el objeto de primer nivel (Object.assign), no sus arreglos/objetos
   // internos (categorías, tema, cuadrícula) — así que llamarla dos veces
@@ -900,6 +919,7 @@ function adoptRemoteDirectly(remote){
     state.theme = decodedMeta.theme ? deepClone(decodedMeta.theme) : state.theme;
     state.advancedConfigPassword = decodedMeta.advancedConfigPassword || state.advancedConfigPassword;
     state.deletePassword = decodedMeta.deletePassword || state.deletePassword;
+    state.debtPassword = decodedMeta.debtPassword || state.debtPassword;
   }
   // lastSyncSnapshot queda como un espejo EXACTO de lo que se acaba de
   // adoptar — "state" y "lastSyncSnapshot" siempre consistentes entre sí,
@@ -916,6 +936,8 @@ function adoptRemoteDirectly(remote){
     pendingSales: deepClone(remote.pendingSales) || {},
     cashMovements: deepClone(remote.cashMovements) || {},
     cashClosures: deepClone(remote.cashClosures) || {},
+    debtors: deepClone(remote.debtors) || {},
+    debtPayments: deepClone(remote.debtPayments) || {},
     meta: decodedMeta ? deepClone(decodedMeta) : null
   };
   applyDefaultsAndMigrations();
@@ -941,6 +963,7 @@ function applyRemoteSnapshot(remote){
       state.theme = mergedMeta.theme || state.theme;
       state.advancedConfigPassword = mergedMeta.advancedConfigPassword || state.advancedConfigPassword;
       state.deletePassword = mergedMeta.deletePassword || state.deletePassword;
+      state.debtPassword = mergedMeta.debtPassword || state.debtPassword;
       changed = true;
     }
     lastSyncSnapshot.meta = confirmedMeta;
@@ -951,7 +974,9 @@ function applyRemoteSnapshot(remote){
     ["sales", "sales"],
     ["pendingSales", "pendingSales"],
     ["cashMovements", "cashMovements"],
-    ["cashClosures", "cashClosures"]
+    ["cashClosures", "cashClosures"],
+    ["debtors", "debtors"],
+    ["debtPayments", "debtPayments"]
   ];
   collections.forEach(([remoteKey, stateKey]) => {
     // BUG REAL CORREGIDO AQUÍ: antes, si remote[remoteKey] no existía (por
@@ -998,7 +1023,7 @@ function applyRemoteSnapshot(remote){
 // ahí (como el archivo histórico). Ahora: un solo listener por cada rama que
 // el sistema realmente usa (la primera lectura de cada una es la lectura
 // inicial), y lo archivado de jornadas viejas ("archive") nunca se descarga.
-const SYNC_CHILDREN = ["meta", "products", "sales", "pendingSales", "cashMovements", "cashClosures"];
+const SYNC_CHILDREN = ["meta", "products", "sales", "pendingSales", "cashMovements", "cashClosures", "debtors", "debtPayments"];
 let remoteCache = {};
 let remoteReceived = {};
 let remoteApplyTimer = null;
@@ -1061,7 +1086,106 @@ function debounce(fn, wait){
 }
 
 // ---------- TEMA VISUAL (Configuración general) ----------
+// Título de la pestaña = nombre del negocio; ícono de la pestaña = el logo
+// subido en Configuración (o, si no hay logo, la inicial del negocio).
+function updateBrowserTabIdentity(){
+  const name = (state.businessName || "POS Shalom").trim() || "POS Shalom";
+  if (document.title !== name) document.title = name;
+  const link = document.getElementById("appFavicon");
+  if (!link) return;
+  const t = state.theme || {};
+  let href;
+  if (t.logoDataUrl){
+    href = t.logoDataUrl;
+  } else {
+    const accent = t.accentColor || "#f2a649";
+    const letter = name.charAt(0).toUpperCase().replace(/[&<>"']/g, "P");
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="${accent}"/><text x="32" y="44" font-size="38" font-family="Arial,sans-serif" font-weight="700" text-anchor="middle" fill="#1c1406">${letter}</text></svg>`;
+    href = "data:image/svg+xml," + encodeURIComponent(svg);
+  }
+  if (link.getAttribute("href") !== href){
+    link.setAttribute("href", href);
+    link.setAttribute("type", t.logoDataUrl ? "image/png" : "image/svg+xml");
+  }
+}
+
+// Ícono para "Añadir a pantalla de inicio" en el celular: los celulares no usan
+// el ícono de la pestaña sino un ícono PNG propio (apple-touch-icon en iPhone,
+// manifest en Android). Se genera con el mismo logo (o la inicial) y se
+// actualiza solo cuando cambia el logo, el nombre o el color.
+let homeIconKey = "";
+let homeManifestUrl = null;
+function updateHomeScreenIcon(){
+  const t = state.theme || {};
+  const name = (state.businessName || "POS Shalom").trim() || "POS Shalom";
+  const accent = t.accentColor || "#f2a649";
+  const bg = t.bgColor || "#161d27";
+  const key = [name, accent, bg, t.logoDataUrl ? t.logoDataUrl.length + ":" + t.logoDataUrl.slice(-40) : ""].join("|");
+  if (key === homeIconKey) return;
+  homeIconKey = key;
+
+  const draw = (img) => {
+    const make = (size) => {
+      const c = document.createElement("canvas");
+      c.width = c.height = size;
+      const g = c.getContext("2d");
+      g.fillStyle = img ? bg : accent;
+      g.fillRect(0, 0, size, size);
+      if (img){
+        const pad = size * 0.08;
+        const box = size - pad * 2;
+        const ratio = Math.min(box / img.width, box / img.height);
+        const w = img.width * ratio, h = img.height * ratio;
+        g.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+      } else {
+        g.fillStyle = "#1c1406";
+        g.font = `700 ${Math.round(size * 0.6)}px Arial, sans-serif`;
+        g.textAlign = "center";
+        g.textBaseline = "middle";
+        g.fillText(name.charAt(0).toUpperCase(), size / 2, size / 2 + size * 0.04);
+      }
+      return c.toDataURL("image/png");
+    };
+    try {
+      const icon180 = make(180), icon192 = make(192), icon512 = make(512);
+      const apple = document.getElementById("appTouchIcon");
+      if (apple) apple.setAttribute("href", icon180);
+      const titleMeta = document.getElementById("appTitleMeta");
+      if (titleMeta) titleMeta.setAttribute("content", name);
+      const manifest = {
+        name, short_name: name.slice(0, 12),
+        start_url: location.origin + location.pathname,
+        scope: location.origin + location.pathname.replace(/[^/]*$/, ""),
+        display: "browser",
+        background_color: bg, theme_color: bg,
+        icons: [
+          { src: icon192, sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: icon512, sizes: "512x512", type: "image/png", purpose: "any" }
+        ]
+      };
+      const link = document.getElementById("appManifest");
+      if (link && typeof Blob !== "undefined" && window.URL && URL.createObjectURL){
+        const url = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: "application/manifest+json" }));
+        link.setAttribute("href", url);
+        if (homeManifestUrl) URL.revokeObjectURL(homeManifestUrl);
+        homeManifestUrl = url;
+      }
+    } catch (e){ /* si el navegador no permite canvas, se queda el ícono por defecto */ }
+  };
+
+  if (t.logoDataUrl){
+    const img = new Image();
+    img.onload = () => draw(img);
+    img.onerror = () => draw(null);
+    img.src = t.logoDataUrl;
+  } else {
+    draw(null);
+  }
+}
+
 function applyTheme(){
+  updateBrowserTabIdentity();
+  updateHomeScreenIcon();
   const t = state.theme || {};
   document.documentElement.style.setProperty("--bg", t.bgColor || "#161d27");
   document.documentElement.style.setProperty("--accent", t.accentColor || "#f2a649");
@@ -1115,6 +1239,7 @@ const CAJERO_NAV = [
   { view: "products", icon: "▦", label: "Productos" },
   { view: "history", icon: "≡", label: "Historial de ventas" },
   { view: "cashregister", icon: "🗃", label: "Apertura y cierre" },
+  { view: "debts", icon: "💳", label: "Deuda" },
   { view: "settings", icon: "⚙", label: "Configuración" }
 ];
 const ENTREGA_NAV = [
@@ -1245,6 +1370,9 @@ function switchView(viewName){
   if (viewName === "deliverydetail") renderDeliveryDetail();
   if (viewName === "visibility") renderVisibilityScreen();
   if (viewName === "categories") renderCategoryAdminList();
+  if (viewName === "debts") renderDebts();
+  if (viewName === "debtors") renderDebtors();
+  if (viewName === "debtdetail") renderDebtDetail();
   if (viewName === "subcategories") renderSubcategoryAdminList();
   if (viewName === "stock") renderStockScreen();
   if (viewName === "stocklow") renderStockLowScreen();
@@ -1321,6 +1449,11 @@ function getCurrentJornadaMovements(){
 // guarda un "total acumulado"), así que editar o eliminar un movimiento
 // nunca descuadra el saldo. excludeMovementId permite validar una edición
 // sin contar el efecto que ese mismo movimiento tenía antes de editarse.
+function getCurrentJornadaDebtPayments(){
+  if (!state.cashRegister) return [];
+  const openedTime = new Date(state.cashRegister.openedAt).getTime();
+  return (state.debtPayments || []).filter(p => !p.deleted && new Date(p.date).getTime() >= openedTime);
+}
 function computeAccountBalance(account, excludeMovementId){
   const jornadaSales = getCurrentJornadaSales();
   const salesTotal = jornadaSales.reduce((a,s) => a + (account === "efectivo" ? (s.cash || 0) : (s.qr || 0)), 0);
@@ -1328,7 +1461,8 @@ function computeAccountBalance(account, excludeMovementId){
   const entradas = movements.filter(m => m.type === "entrada").reduce((a,m) => a + m.amount, 0);
   const salidas = movements.filter(m => m.type === "salida").reduce((a,m) => a + m.amount, 0);
   const initial = (account === "efectivo" && state.cashRegister) ? state.cashRegister.initialAmount : 0;
-  return initial + salesTotal + entradas - salidas;
+  const debtCollected = getCurrentJornadaDebtPayments().reduce((a,p) => a + (account === "efectivo" ? (p.cash || 0) : (p.qr || 0)), 0);
+  return initial + salesTotal + entradas - salidas + debtCollected;
 }
 
 // "Ventas + entradas - salidas" de una cuenta, SIN el monto inicial de caja
@@ -1353,6 +1487,10 @@ function renderResumenDia(){
   document.getElementById("statTotal").textContent = "Bs " + total.toFixed(2);
   document.getElementById("statCash").textContent = "Bs " + cash.toFixed(2);
   document.getElementById("statQr").textContent = "Bs " + qr.toFixed(2);
+  const onDebtToday = jornadaSales.reduce((a,s) => a + (s.debt ? Math.max(0, s.total - (s.cash||0) - (s.qr||0)) : 0), 0);
+  const debtCollectedToday = getCurrentJornadaDebtPayments().reduce((a,p) => a + (p.amount || 0), 0);
+  document.getElementById("statOnDebt").textContent = "Bs " + onDebtToday.toFixed(2);
+  document.getElementById("statDebtCollected").textContent = "Bs " + debtCollectedToday.toFixed(2);
   document.getElementById("statCount").textContent = jornadaSales.length;
   document.getElementById("statProductsSold").textContent = productsCount;
   document.getElementById("statCashAdjusted").textContent = "Bs " + computeSalesAdjusted("efectivo").toFixed(2);
@@ -1546,9 +1684,10 @@ function computeTotals(sales){
   const cash = sales.reduce((a,s) => a + (s.cash || 0), 0);
   const qr = sales.reduce((a,s) => a + (s.qr || 0), 0);
   const mixto = sales.filter(s => s.method === "mixto").reduce((a,s) => a + s.total, 0);
+  const onDebt = sales.reduce((a,s) => a + (s.debt ? Math.max(0, Math.round((s.total - (s.cash||0) - (s.qr||0)) * 100) / 100) : 0), 0);
   const salesCount = sales.length;
   const productsCount = sales.reduce((a,s) => a + s.items.reduce((b,i) => b + i.qty, 0), 0);
-  return { total, cash, qr, mixto, salesCount, productsCount };
+  return { total, cash, qr, mixto, onDebt, salesCount, productsCount };
 }
 
 function computeProductDetail(sales){
@@ -1608,7 +1747,7 @@ function runOrphanRepairIfSafe(){
 function archiveOldJornadaData(){
   if (!fbReady || !appStarted || fbStatus !== "ok" || archiving) return;
   const cutoff = state.cashRegister && state.cashRegister.openedAt ? new Date(state.cashRegister.openedAt).getTime() : Infinity;
-  const oldSales = state.sales.filter(s => new Date(s.date).getTime() < cutoff && s.id !== editingSaleId);
+  const oldSales = state.sales.filter(s => new Date(s.date).getTime() < cutoff && s.id !== editingSaleId && !(s.debt && !s.deleted));
   const oldMoves = (state.cashMovements || []).filter(m => new Date(m.date).getTime() < cutoff);
   if (oldSales.length === 0 && oldMoves.length === 0) return;
   archiving = true;
@@ -1650,6 +1789,18 @@ function performCloseRegister(){
 
   const totals = computeTotals(activeSales);
   const productDetail = computeProductDetail(activeSales);
+  const periodDebtPayments = (state.debtPayments || []).filter(p => {
+    const t = new Date(p.date).getTime();
+    return !p.deleted && t >= new Date(reg.openedAt).getTime() && t <= new Date(closedAt).getTime();
+  });
+  const debtInfo = {
+    collectedCash: periodDebtPayments.reduce((a,p) => a + (p.cash || 0), 0),
+    collectedQr: periodDebtPayments.reduce((a,p) => a + (p.qr || 0), 0),
+    payments: periodDebtPayments.map(p => {
+      const d = (state.debtors || []).find(x => x.id === p.debtorId);
+      return { debtorName: d ? d.name : "—", date: p.date, cash: p.cash || 0, qr: p.qr || 0 };
+    })
+  };
   const closure = {
     id: uid("cls"),
     openedAt: reg.openedAt,
@@ -1660,7 +1811,8 @@ function performCloseRegister(){
     salesDetail: activeSales.map(s => ({ id: s.id, jornadaNumber: s.jornadaNumber, date: s.date, name: s.name || null, cash: s.cash, qr: s.qr, method: s.method, total: s.total })),
     deletedSales: deletedSalesInPeriod.map(s => ({ id: s.id, jornadaNumber: s.jornadaNumber, date: s.date, name: s.name || null, total: s.total, deletedAt: s.deletedAt })),
     movements: periodMovements.map(m => ({ type: m.type, description: m.description, account: m.account, amount: m.amount, date: m.date })),
-    movementsSummary: { entradasEfectivo, salidasEfectivo, entradasQr, salidasQr }
+    movementsSummary: { entradasEfectivo, salidasEfectivo, entradasQr, salidasQr },
+    debt: debtInfo
   };
   state.cashClosures.push(closure);
   state.cashRegister = null;
@@ -1674,8 +1826,9 @@ function showClosureSummary(closure, isHistoryView){
   const dOpen = new Date(closure.openedAt);
   const dClose = new Date(closure.closedAt);
   const ms = closure.movementsSummary || { entradasEfectivo:0, salidasEfectivo:0, entradasQr:0, salidasQr:0 };
-  const efectivoCaja = closure.initialAmount + closure.totals.cash + ms.entradasEfectivo - ms.salidasEfectivo;
-  const qrAjustado = closure.totals.qr + ms.entradasQr - ms.salidasQr;
+  const dbt = closure.debt || { collectedCash: 0, collectedQr: 0, payments: [] };
+  const efectivoCaja = closure.initialAmount + closure.totals.cash + ms.entradasEfectivo - ms.salidasEfectivo + (dbt.collectedCash || 0);
+  const qrAjustado = closure.totals.qr + ms.entradasQr - ms.salidasQr + (dbt.collectedQr || 0);
   const productsHtml = closure.productDetail.map(p => `
     <div class="pay-line"><span>${p.name}</span><span>${p.qty} unid.</span></div>
   `).join("") || `<p class="muted" style="font-size:.85rem;">No se vendieron productos.</p>`;
@@ -1692,6 +1845,9 @@ function showClosureSummary(closure, isHistoryView){
     <div class="pay-line"><span>Total efectivo</span><span>Bs ${closure.totals.cash.toFixed(2)}</span></div>
     <div class="pay-line"><span>Total QR</span><span>Bs ${closure.totals.qr.toFixed(2)}</span></div>
     <div class="pay-line"><span>Total mixto</span><span>Bs ${closure.totals.mixto.toFixed(2)}</span></div>
+    <div class="pay-line"><span>Quedó a deuda (por cobrar)</span><span>Bs ${(closure.totals.onDebt || 0).toFixed(2)}</span></div>
+    <div class="pay-line"><span>Cobros de deudas — efectivo</span><span>Bs ${(dbt.collectedCash || 0).toFixed(2)}</span></div>
+    <div class="pay-line"><span>Cobros de deudas — QR</span><span>Bs ${(dbt.collectedQr || 0).toFixed(2)}</span></div>
     <div class="pay-line highlight"><span>Total de ventas</span><span>Bs ${closure.totals.total.toFixed(2)}</span></div>
     <div class="pay-line highlight"><span>Total efectivo + caja</span><span>Bs ${efectivoCaja.toFixed(2)}</span></div>
     <div class="pay-line highlight"><span>QR (con entradas/salidas)</span><span>Bs ${qrAjustado.toFixed(2)}</span></div>
@@ -1798,7 +1954,8 @@ function exportClosurePdf(closure){
     const initialAmount = closure.initialAmount || 0;
     const totals = closure.totals || { total:0, cash:0, qr:0, mixto:0, salesCount:0, productsCount:0 };
     const ms2 = closure.movementsSummary || { entradasEfectivo:0, salidasEfectivo:0, entradasQr:0, salidasQr:0 };
-    const efectivoCaja = initialAmount + (totals.cash || 0) + ms2.entradasEfectivo - ms2.salidasEfectivo;
+    const dbt2 = closure.debt || { collectedCash: 0, collectedQr: 0, payments: [] };
+    const efectivoCaja = initialAmount + (totals.cash || 0) + ms2.entradasEfectivo - ms2.salidasEfectivo + (dbt2.collectedCash || 0);
 
     y = drawPdfTable(doc, {
       startY: y,
@@ -1815,8 +1972,11 @@ function exportClosurePdf(closure){
         ["Salidas efectivo", "Bs " + ms2.salidasEfectivo.toFixed(2)],
         ["Entradas QR", "Bs " + ms2.entradasQr.toFixed(2)],
         ["Salidas QR", "Bs " + ms2.salidasQr.toFixed(2)],
+        ["Quedó a deuda (por cobrar)", "Bs " + (totals.onDebt || 0).toFixed(2)],
+        ["Cobros de deudas — efectivo", "Bs " + (dbt2.collectedCash || 0).toFixed(2)],
+        ["Cobros de deudas — QR", "Bs " + (dbt2.collectedQr || 0).toFixed(2)],
         ["Total efectivo + caja", "Bs " + efectivoCaja.toFixed(2)],
-        ["QR (con entradas/salidas)", "Bs " + (( totals.qr || 0) + ms2.entradasQr - ms2.salidasQr).toFixed(2)],
+        ["QR (con entradas/salidas)", "Bs " + (( totals.qr || 0) + ms2.entradasQr - ms2.salidasQr + (dbt2.collectedQr || 0)).toFixed(2)],
         ["Cantidad de ventas", String(totals.salesCount || 0)],
         ["Cantidad de productos vendidos", String(totals.productsCount || 0)]
       ]
@@ -2472,6 +2632,7 @@ function openSpecificPayModal(method){
   if (method === "efectivo") openCashModal(total, prefillCash);
   if (method === "qr") openQrModal(total);
   if (method === "mixto") openMixModal(total, prefillCash);
+  if (method === "deuda") openDebtSaleModal(total);
 }
 
 // ---------- SELECCIONES EXTRA (opciones avanzadas, por unidad) ----------
@@ -2727,16 +2888,16 @@ function openNameModal(method, cash, qr){
 }
 
 let finalizingSale = false; // evita que un doble clic durante la breve espera de red cree dos ventas
-async function finalizeSale(name, method, cash, qr){
+async function finalizeSale(name, method, cash, qr, debt){
   if (finalizingSale) return;
   finalizingSale = true;
   try {
-    await finalizeSaleInner(name, method, cash, qr);
+    await finalizeSaleInner(name, method, cash, qr, debt);
   } finally {
     finalizingSale = false;
   }
 }
-async function finalizeSaleInner(name, method, cash, qr){
+async function finalizeSaleInner(name, method, cash, qr, debt){
   const total = getCartTotal();
   const subtotal = state.cart.reduce((a,i) => a + i.price*i.qty, 0);
   const discount = subtotal - total;
@@ -2825,6 +2986,7 @@ async function finalizeSaleInner(name, method, cash, qr){
       deviceId: getDeviceId(),
       delivery: { units: generateDeliveryUnits(itemsSnapshot, false), finalized: false }
     };
+    if (debt) sale.debt = { debtorId: debt.debtorId, debtorName: debt.debtorName };
     state.sales.push(sale);
     saveState();
     resetCartAfterSale();
@@ -2942,6 +3104,375 @@ function setDeviceNamesEnabled(v){
   renderDevicesBlock();
 }
 
+// ---------- DEUDAS (ventas fiadas) ----------
+// Una venta a deuda es una venta normal (descuenta stock, va a Entrega de
+// pedidos) con method "deuda" y debt:{debtorId}. En cash/qr guarda SOLO el pago
+// inicial: eso es lo único que entra a caja ese día. Lo que falta se cobra
+// después con "abonos" (state.debtPayments), que entran a caja el día en que
+// se cobran. Los abonos se aplican a la compra más antigua primero.
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+function debtorSalesList(debtorId){
+  return state.sales.filter(s => s.debt && s.debt.debtorId === debtorId && !s.deleted)
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+}
+function debtorPaymentsList(debtorId){
+  return (state.debtPayments || []).filter(p => p.debtorId === debtorId && !p.deleted)
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+}
+// Estado de cuenta de un cliente: cada compra con cuánto se abonó y cuánto falta.
+function computeDebtorLedger(debtorId){
+  const sales = debtorSalesList(debtorId);
+  const payments = debtorPaymentsList(debtorId);
+  let pool = round2(payments.reduce((a, p) => a + (p.amount || 0), 0));
+  const purchases = sales.map(sale => {
+    const initial = round2((sale.cash || 0) + (sale.qr || 0));
+    const owed = Math.max(0, round2(sale.total - initial));
+    const allocated = Math.min(owed, pool);
+    pool = round2(pool - allocated);
+    const remaining = round2(owed - allocated);
+    const status = remaining <= 0.004 ? "pagada" : (allocated > 0.004 ? "parcial" : "pendiente");
+    return { sale, initial, owed, allocated, remaining, status };
+  });
+  const balance = round2(purchases.reduce((a, p) => a + p.remaining, 0));
+  return { purchases, payments, balance };
+}
+function debtorBalance(debtorId){ return computeDebtorLedger(debtorId).balance; }
+function deviceNameOf(obj){
+  if (!state.deviceNamesEnabled || !obj || !obj.deviceId) return "";
+  const dev = (state.devices || []).find(d => d.id === obj.deviceId);
+  return dev && dev.name ? dev.name : "";
+}
+const STATUS_LABEL = { pagada: "PAGADA", parcial: "PARCIAL", pendiente: "PENDIENTE" };
+
+// --- Botón "Venta a deuda" en Nueva venta ---
+document.getElementById("btnDebtSale").addEventListener("click", () => {
+  if (editingSaleId){
+    alert("Una venta que se está editando no se puede cambiar a deuda.");
+    return;
+  }
+  openPayModal("deuda");
+});
+
+// Modal: elegir/crear cliente + pago inicial opcional (efectivo y/o QR).
+function openDebtSaleModal(total, draft){
+  draft = draft || {};
+  const debtors = (state.debtors || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  const options = [`<option value="">— Elegir cliente —</option>`]
+    .concat(debtors.map(d => `<option value="${escapeHtml(d.id)}" ${draft.debtorId === d.id ? "selected" : ""}>${escapeHtml(d.name)}</option>`))
+    .concat([`<option value="__new__" ${draft.debtorId === "__new__" ? "selected" : ""}>+ Crear cliente nuevo</option>`]);
+  showModal(`
+    <h2>Venta a deuda</h2>
+    <label>Total de la venta</label>
+    <p class="modal-total">Bs ${total.toFixed(2)}</p>
+    <label>Cliente</label>
+    <select id="dsDebtor">${options.join("")}</select>
+    <div id="dsNewBlock" class="${draft.debtorId === "__new__" ? "" : "hidden"}">
+      <label>Nombre completo</label>
+      <input type="text" id="dsNewName" value="${escapeHtml(draft.newName || "")}" placeholder="Ej: Juan Pérez">
+      <label>Número de teléfono</label>
+      <input type="tel" id="dsNewPhone" inputmode="tel" value="${escapeHtml(draft.newPhone || "")}" placeholder="Ej: 70000000">
+      <label>Descripción</label>
+      <input type="text" id="dsNewDesc" value="${escapeHtml(draft.newDesc || "")}" placeholder="Ej: Vecino, paga a fin de mes">
+    </div>
+    <label>Pago inicial (opcional)</label>
+    <div class="debt-two-cols">
+      <div><span class="muted" style="font-size:.78rem;">Efectivo</span><input type="number" id="dsCash" min="0" step="any" inputmode="decimal" placeholder="0.00" value="${draft.cash || ""}"></div>
+      <div><span class="muted" style="font-size:.78rem;">QR</span><input type="number" id="dsQr" min="0" step="any" inputmode="decimal" placeholder="0.00" value="${draft.qr || ""}"></div>
+    </div>
+    <div class="pay-line highlight" id="dsSummary"></div>
+    <p class="import-feedback" id="dsError"></p>
+    <div class="modal-actions">
+      <button class="modal-cancel" id="dsCancel">Cancelar</button>
+      <button class="modal-confirm" id="dsSave">Guardar</button>
+    </div>
+  `);
+  const sel = document.getElementById("dsDebtor");
+  const cashEl = document.getElementById("dsCash");
+  const qrEl = document.getElementById("dsQr");
+  const sum = document.getElementById("dsSummary");
+  const err = document.getElementById("dsError");
+  function paid(){ return round2(Math.max(0, parseFloat(cashEl.value) || 0) + Math.max(0, parseFloat(qrEl.value) || 0)); }
+  function refresh(){
+    document.getElementById("dsNewBlock").classList.toggle("hidden", sel.value !== "__new__");
+    sum.textContent = `Pago inicial: Bs ${paid().toFixed(2)} · Quedará a deuda: Bs ${Math.max(0, round2(total - paid())).toFixed(2)}`;
+    err.textContent = "";
+  }
+  sel.addEventListener("change", refresh);
+  cashEl.addEventListener("input", refresh);
+  qrEl.addEventListener("input", refresh);
+  refresh();
+  document.getElementById("dsCancel").addEventListener("click", closeModal);
+  document.getElementById("dsSave").addEventListener("click", () => {
+    const fail = (msg) => { err.textContent = msg; err.className = "import-feedback error"; };
+    const cash = round2(Math.max(0, parseFloat(cashEl.value) || 0));
+    const qr = round2(Math.max(0, parseFloat(qrEl.value) || 0));
+    const choice = sel.value;
+    if (!choice) return fail("Elige un cliente o crea uno nuevo.");
+    let newInfo = null;
+    if (choice === "__new__"){
+      const name = document.getElementById("dsNewName").value.trim();
+      if (!name) return fail("Escribe el nombre completo del cliente.");
+      newInfo = { name, phone: document.getElementById("dsNewPhone").value.trim(), description: document.getElementById("dsNewDesc").value.trim() };
+      const dup = (state.debtors || []).find(d => d.name.trim().toLowerCase() === name.toLowerCase());
+      if (dup) return fail(`Ya existe un cliente llamado "${dup.name}". Elígelo de la lista.`);
+    }
+    if (round2(cash + qr) >= total) return fail("El pago inicial no puede ser igual o mayor al total. Si pagó todo, usa Efectivo, QR o Mixto.");
+    const draftNow = { debtorId: choice, newName: newInfo ? newInfo.name : "", newPhone: newInfo ? newInfo.phone : "", newDesc: newInfo ? newInfo.description : "", cash: cash || "", qr: qr || "" };
+    promptPassword("Venta a deuda", "Ingresa la contraseña de deudas para guardar.", () => state.debtPassword, () => {
+      let debtor;
+      if (newInfo){
+        debtor = { id: uid("dbt"), name: newInfo.name, phone: newInfo.phone, description: newInfo.description, createdAt: new Date().toISOString() };
+        state.debtors.push(debtor);
+      } else {
+        debtor = state.debtors.find(d => d.id === choice);
+      }
+      if (!debtor) return;
+      finalizeSale(debtor.name, "deuda", cash, qr, { debtorId: debtor.id, debtorName: debtor.name });
+    }, { numeric: true, onCancel: () => openDebtSaleModal(total, draftNow) });
+  });
+}
+
+// --- Sección "Deuda" ---
+let currentDebtorId = null;
+
+function renderDebts(){
+  const list = document.getElementById("debtList");
+  list.innerHTML = "";
+  const rows = (state.debtors || []).map(d => ({ d, balance: debtorBalance(d.id) })).filter(r => r.balance > 0.004)
+    .sort((a, b) => a.d.name.localeCompare(b.d.name));
+  const totalPending = rows.reduce((a, r) => a + r.balance, 0);
+  document.getElementById("debtTotalPending").textContent = "Bs " + totalPending.toFixed(2);
+  if (rows.length === 0){
+    list.innerHTML = `<p class="empty-msg">No hay deudas pendientes.</p>`;
+    return;
+  }
+  rows.forEach(({ d, balance }) => {
+    const row = document.createElement("div");
+    row.className = "history-row";
+    row.innerHTML = `
+      <span class="hnum" style="width:auto; flex:1; min-width:140px;">${escapeHtml(d.name)}</span>
+      <span class="htotal" style="color:var(--danger);">Debe Bs ${balance.toFixed(2)}</span>
+      <div class="hactions">
+        <button class="mini-btn" data-debt-view="${escapeHtml(d.id)}">Ver</button>
+        <button class="mini-btn" data-debt-pay="${escapeHtml(d.id)}">Pagar</button>
+      </div>`;
+    list.appendChild(row);
+  });
+  list.querySelectorAll("[data-debt-view]").forEach(b => b.addEventListener("click", () => openDebtDetail(b.dataset.debtView)));
+  list.querySelectorAll("[data-debt-pay]").forEach(b => b.addEventListener("click", () => openDebtPayModal(b.dataset.debtPay)));
+}
+document.getElementById("btnDebtors").addEventListener("click", () => { switchViewRaw("debtors"); renderDebtors(); });
+document.getElementById("btnBackToDebts").addEventListener("click", () => switchView("debts"));
+document.getElementById("btnBackToDebtsFromDetail").addEventListener("click", () => switchView("debts"));
+
+function renderDebtors(){
+  const list = document.getElementById("debtorsList");
+  list.innerHTML = "";
+  const debtors = (state.debtors || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (debtors.length === 0){
+    list.innerHTML = `<p class="empty-msg">Todavía no hay deudores. Se crean al guardar una venta a deuda, o con "+ Agregar deudor".</p>`;
+    return;
+  }
+  debtors.forEach(d => {
+    const balance = debtorBalance(d.id);
+    const row = document.createElement("div");
+    row.className = "history-row";
+    row.innerHTML = `
+      <span class="hnum" style="width:auto; flex:1; min-width:140px;">${escapeHtml(d.name)}</span>
+      <span class="hmeta">${d.phone ? "Tel: " + escapeHtml(d.phone) + " · " : ""}${balance > 0.004 ? "Debe Bs " + balance.toFixed(2) : "Sin deuda"}</span>
+      <div class="hactions">
+        <button class="mini-btn" data-debtor-view="${escapeHtml(d.id)}">Ver</button>
+        <button class="mini-btn danger" data-debtor-del="${escapeHtml(d.id)}">Eliminar</button>
+      </div>`;
+    list.appendChild(row);
+  });
+  list.querySelectorAll("[data-debtor-view]").forEach(b => b.addEventListener("click", () => openDebtorEditModal(b.dataset.debtorView)));
+  list.querySelectorAll("[data-debtor-del]").forEach(b => b.addEventListener("click", () => deleteDebtor(b.dataset.debtorDel)));
+}
+document.getElementById("btnAddDebtor").addEventListener("click", () => openDebtorEditModal(null));
+
+// Ver / editar datos de un deudor (o crear uno nuevo si id es null).
+function openDebtorEditModal(id){
+  const d = id ? state.debtors.find(x => x.id === id) : null;
+  if (id && !d) return;
+  showModal(`
+    <h2>${d ? "Datos del deudor" : "Agregar deudor"}</h2>
+    <label>Nombre completo</label>
+    <input type="text" id="dbName" value="${d ? escapeHtml(d.name) : ""}">
+    <label>Número de teléfono</label>
+    <input type="tel" id="dbPhone" inputmode="tel" value="${d ? escapeHtml(d.phone || "") : ""}">
+    <label>Descripción</label>
+    <input type="text" id="dbDesc" value="${d ? escapeHtml(d.description || "") : ""}">
+    ${d ? `<div class="pay-line highlight" style="margin-top:10px;"><span>Deuda pendiente</span><span>Bs ${debtorBalance(d.id).toFixed(2)}</span></div>` : ""}
+    <p class="import-feedback" id="dbError"></p>
+    <div class="modal-actions">
+      <button class="modal-cancel" id="dbCancel">Cancelar</button>
+      <button class="modal-confirm" id="dbSave">Guardar</button>
+    </div>
+  `);
+  document.getElementById("dbCancel").addEventListener("click", closeModal);
+  document.getElementById("dbSave").addEventListener("click", () => {
+    const name = document.getElementById("dbName").value.trim();
+    const err = document.getElementById("dbError");
+    if (!name){ err.textContent = "Escribe el nombre completo."; err.className = "import-feedback error"; return; }
+    const dup = state.debtors.find(x => x.name.trim().toLowerCase() === name.toLowerCase() && (!d || x.id !== d.id));
+    if (dup){ err.textContent = `Ya existe un cliente llamado "${dup.name}".`; err.className = "import-feedback error"; return; }
+    const phone = document.getElementById("dbPhone").value.trim();
+    const description = document.getElementById("dbDesc").value.trim();
+    if (d){
+      d.name = name; d.phone = phone; d.description = description;
+    } else {
+      state.debtors.push({ id: uid("dbt"), name, phone, description, createdAt: new Date().toISOString() });
+    }
+    saveState(); closeModal(); renderDebtors();
+  });
+  setEnterConfirm("dbSave");
+}
+function deleteDebtor(id){
+  const d = state.debtors.find(x => x.id === id);
+  if (!d) return;
+  const balance = debtorBalance(id);
+  if (balance > 0.004){
+    alert(`No se puede eliminar a "${d.name}": tiene una deuda pendiente de Bs ${balance.toFixed(2)}.`);
+    return;
+  }
+  openConfirmModal("Eliminar deudor", `¿Seguro que quieres eliminar a "${d.name}"? Su historial de compras pagadas dejará de mostrarse aquí.`, () => {
+    state.debtors = state.debtors.filter(x => x.id !== id);
+    saveState(); renderDebtors();
+  }, true, {}, true);
+}
+
+// Historial de compras de un cliente (con estado de cada una) y sus pagos.
+function openDebtDetail(id){
+  currentDebtorId = id;
+  switchViewRaw("debtdetail");
+  renderDebtDetail();
+}
+function renderDebtDetail(){
+  const d = (state.debtors || []).find(x => x.id === currentDebtorId);
+  if (!d){ switchView("debts"); return; }
+  const ledger = computeDebtorLedger(d.id);
+  document.getElementById("debtDetailTitle").textContent = d.name;
+  document.getElementById("debtDetailMeta").textContent = [d.phone ? "Tel: " + d.phone : "", d.description || ""].filter(Boolean).join(" · ");
+  document.getElementById("debtDetailBalance").textContent = "Bs " + ledger.balance.toFixed(2);
+
+  const list = document.getElementById("debtPurchases");
+  list.innerHTML = "";
+  if (ledger.purchases.length === 0){
+    list.innerHTML = `<p class="empty-msg">Este cliente todavía no tiene compras a deuda.</p>`;
+  }
+  [...ledger.purchases].reverse().forEach(p => {
+    const dt = new Date(p.sale.date);
+    const row = document.createElement("div");
+    row.className = "history-row debt-purchase " + p.status;
+    row.innerHTML = `
+      <span class="hmeta" style="color:var(--text); flex:1; min-width:150px;">
+        <strong>${dt.toLocaleDateString()} ${dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</strong>
+        <span class="tag debt-tag ${p.status}">${STATUS_LABEL[p.status]}</span><br>
+        <span class="muted" style="font-size:.82rem;">Total Bs ${p.sale.total.toFixed(2)} · Pago inicial Bs ${p.initial.toFixed(2)} · Abonado después Bs ${p.allocated.toFixed(2)}</span>
+      </span>
+      <span class="htotal" style="width:auto; color:${p.remaining > 0.004 ? "var(--danger)" : "var(--accent)"};">${p.remaining > 0.004 ? "Falta Bs " + p.remaining.toFixed(2) : "Pagada"}</span>
+      <div class="hactions"><button class="mini-btn" data-debt-sale="${escapeHtml(p.sale.id)}">Ver</button></div>`;
+    list.appendChild(row);
+  });
+  list.querySelectorAll("[data-debt-sale]").forEach(b => b.addEventListener("click", () => showDebtPurchaseModal(b.dataset.debtSale)));
+
+  const plist = document.getElementById("debtPaymentsList");
+  plist.innerHTML = "";
+  if (ledger.payments.length === 0){
+    plist.innerHTML = `<p class="empty-msg">Todavía no hay pagos de esta deuda.</p>`;
+  }
+  [...ledger.payments].reverse().forEach(p => {
+    const dt = new Date(p.date);
+    const who = deviceNameOf(p);
+    const row = document.createElement("div");
+    row.className = "history-row";
+    row.innerHTML = `
+      <span class="hmeta" style="color:var(--text); flex:1;">${dt.toLocaleDateString()} ${dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+        · ${p.cash ? "Efectivo Bs " + p.cash.toFixed(2) : ""}${p.cash && p.qr ? " + " : ""}${p.qr ? "QR Bs " + p.qr.toFixed(2) : ""}${who ? " · Cobró: " + escapeHtml(who) : ""}</span>
+      <span class="htotal">Bs ${(p.amount || 0).toFixed(2)}</span>`;
+    plist.appendChild(row);
+  });
+}
+document.getElementById("btnDebtDetailPay").addEventListener("click", () => { if (currentDebtorId) openDebtPayModal(currentDebtorId); });
+
+function showDebtPurchaseModal(saleId){
+  const sale = state.sales.find(x => x.id === saleId);
+  if (!sale || !sale.debt) return;
+  const entry = computeDebtorLedger(sale.debt.debtorId).purchases.find(p => p.sale.id === saleId);
+  const d = new Date(sale.date);
+  const itemsHtml = sale.items.map(i => `<div class="pay-line"><span>${escapeHtml(i.name)} x${i.qty}</span><span>Bs ${(i.finalPrice * i.qty).toFixed(2)}</span></div>`).join("");
+  showModal(`
+    <h2>Compra del ${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</h2>
+    ${itemsHtml}
+    <div class="pay-line highlight"><span>Total</span><span>Bs ${sale.total.toFixed(2)}</span></div>
+    <div class="pay-line"><span>Pago inicial en efectivo</span><span>Bs ${(sale.cash || 0).toFixed(2)}</span></div>
+    <div class="pay-line"><span>Pago inicial por QR</span><span>Bs ${(sale.qr || 0).toFixed(2)}</span></div>
+    <div class="pay-line"><span>Deuda ese día</span><span>Bs ${(entry ? entry.owed : 0).toFixed(2)}</span></div>
+    <div class="pay-line"><span>Abonado después</span><span>Bs ${(entry ? entry.allocated : 0).toFixed(2)}</span></div>
+    <div class="pay-line highlight"><span>Falta pagar</span><span>Bs ${(entry ? entry.remaining : 0).toFixed(2)}</span></div>
+    <div class="modal-actions"><button class="modal-confirm" id="closeDebtPurchase" style="flex:1;">Cerrar</button></div>
+  `);
+  document.getElementById("closeDebtPurchase").addEventListener("click", closeModal);
+}
+
+// Cobro de una deuda: efectivo y/o QR (puede ser mixto), nunca más de lo que debe.
+function openDebtPayModal(debtorId){
+  const d = state.debtors.find(x => x.id === debtorId);
+  if (!d) return;
+  if (!state.cashRegister){
+    alert("Para cobrar una deuda primero debes abrir caja (el cobro entra a la caja del día).");
+    return;
+  }
+  const balance = debtorBalance(debtorId);
+  if (balance <= 0.004){ alert("Este cliente no tiene deuda pendiente."); return; }
+  showModal(`
+    <h2>Cobrar deuda — ${escapeHtml(d.name)}</h2>
+    <label>Deuda pendiente</label>
+    <p class="modal-total">Bs ${balance.toFixed(2)}</p>
+    <label>Monto a cobrar</label>
+    <div class="debt-two-cols">
+      <div><span class="muted" style="font-size:.78rem;">Efectivo</span><input type="number" id="dpCash" min="0" step="any" inputmode="decimal" placeholder="0.00"></div>
+      <div><span class="muted" style="font-size:.78rem;">QR</span><input type="number" id="dpQr" min="0" step="any" inputmode="decimal" placeholder="0.00"></div>
+    </div>
+    <button type="button" class="btn-ghost" id="dpAll" style="margin-top:8px; width:100%;">Pagar saldo total</button>
+    <div class="pay-line highlight" id="dpSummary" style="margin-top:10px;"></div>
+    <p class="import-feedback" id="dpError"></p>
+    <div class="modal-actions">
+      <button class="modal-cancel" id="dpCancel">Cancelar</button>
+      <button class="modal-confirm" id="dpConfirm" disabled>Cobrar</button>
+    </div>
+  `);
+  const cashEl = document.getElementById("dpCash"), qrEl = document.getElementById("dpQr");
+  const sum = document.getElementById("dpSummary"), err = document.getElementById("dpError"), ok = document.getElementById("dpConfirm");
+  function amounts(){ return { cash: round2(Math.max(0, parseFloat(cashEl.value) || 0)), qr: round2(Math.max(0, parseFloat(qrEl.value) || 0)) }; }
+  function refresh(){
+    const { cash, qr } = amounts();
+    const total = round2(cash + qr);
+    sum.textContent = `Cobro: Bs ${total.toFixed(2)} · Quedará debiendo: Bs ${Math.max(0, round2(balance - total)).toFixed(2)}`;
+    if (total > balance + 0.004){ err.textContent = `El cobro no puede ser mayor a la deuda (Bs ${balance.toFixed(2)}).`; err.className = "import-feedback error"; ok.disabled = true; }
+    else { err.textContent = ""; ok.disabled = total <= 0; }
+  }
+  cashEl.addEventListener("input", refresh);
+  qrEl.addEventListener("input", refresh);
+  document.getElementById("dpAll").addEventListener("click", () => { cashEl.value = balance; qrEl.value = ""; refresh(); });
+  refresh();
+  document.getElementById("dpCancel").addEventListener("click", closeModal);
+  ok.addEventListener("click", () => {
+    const { cash, qr } = amounts();
+    const amount = round2(cash + qr);
+    if (amount <= 0 || amount > balance + 0.004) return;
+    state.debtPayments.push({ id: uid("dpay"), debtorId, date: new Date().toISOString(), cash, qr, amount, deviceId: getDeviceId() });
+    saveState();
+    closeModal();
+    showToast("Cobro registrado: Bs " + amount.toFixed(2));
+    if (document.getElementById("view-debtdetail").classList.contains("active")) renderDebtDetail(); else renderDebts();
+  });
+  setEnterConfirm("dpConfirm");
+  setTimeout(() => cashEl.focus(), 50);
+}
+
 // ---------- HISTORIAL DE VENTAS ----------
 // Muestra solo las ventas de la jornada de caja actualmente abierta: al cerrar
 // caja, esa jornada queda guardada dentro del cierre correspondiente, y una
@@ -2961,12 +3492,12 @@ function renderHistory(){
     row.innerHTML = `
       <span class="hnum">#${String(sale.jornadaNumber).padStart(3,'0')}</span>
       <span class="hmeta">
-        ${sale.deleted ? `<span class="tag voided-tag">ANULADA</span> ` : ""}${sale.name ? `<strong>${sale.name}</strong> · ` : ""}${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · <span class="tag">${sale.method}</span>${sellerLabel(sale)}
+        ${sale.deleted ? `<span class="tag voided-tag">ANULADA</span> ` : ""}${sale.name ? `<strong>${sale.name}</strong> · ` : ""}${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · <span class="tag">${sale.debt ? "deuda · pagó Bs " + ((sale.cash||0)+(sale.qr||0)).toFixed(2) : sale.method}</span>${sellerLabel(sale)}
       </span>
       <span class="htotal">Bs ${sale.total.toFixed(2)}</span>
       <div class="hactions">
         <button class="mini-btn" data-view-sale="${sale.id}">Ver</button>
-        ${sale.deleted ? "" : `<button class="mini-btn" data-edit-sale="${sale.id}">Editar pedido</button>
+        ${sale.deleted ? "" : `${sale.debt ? "" : `<button class="mini-btn" data-edit-sale="${sale.id}">Editar pedido</button>`}
         <button class="mini-btn danger" data-delete-sale="${sale.id}">Anular</button>`}
       </div>
     `;
@@ -3002,8 +3533,10 @@ function viewSale(saleId){
       <div class="sum-row"><span>Descuento</span><span>Bs ${sale.discount.toFixed(2)}</span></div>
       <div class="sum-row total"><span>Total</span><span>Bs ${sale.total.toFixed(2)}</span></div>
     </div>
-    <div class="pay-line"><span>Efectivo</span><span>Bs ${sale.cash.toFixed(2)}</span></div>
-    <div class="pay-line"><span>QR</span><span>Bs ${sale.qr.toFixed(2)}</span></div>
+    ${sale.debt ? `<div class="pay-line"><span>Venta a deuda — cliente</span><span>${escapeHtml(sale.debt.debtorName || sale.name || "")}</span></div>` : ""}
+    <div class="pay-line"><span>${sale.debt ? "Pago inicial en efectivo" : "Efectivo"}</span><span>Bs ${sale.cash.toFixed(2)}</span></div>
+    <div class="pay-line"><span>${sale.debt ? "Pago inicial por QR" : "QR"}</span><span>Bs ${sale.qr.toFixed(2)}</span></div>
+    ${sale.debt ? `<div class="pay-line highlight"><span>Quedó a deuda</span><span>Bs ${Math.max(0, sale.total - sale.cash - sale.qr).toFixed(2)}</span></div>` : ""}
     <div class="modal-actions"><button class="modal-confirm" id="closeSaleView">Cerrar</button></div>
   `);
   document.getElementById("closeSaleView").addEventListener("click", closeModal);
@@ -3015,6 +3548,13 @@ function viewSale(saleId){
 function deleteSale(saleId){
   const sale = state.sales.find(s => s.id === saleId);
   if (!sale) return;
+  if (sale.debt){
+    const entry = computeDebtorLedger(sale.debt.debtorId).purchases.find(p => p.sale.id === sale.id);
+    if (entry && entry.allocated > 0.004){
+      alert(`No se puede anular: esta venta a deuda ya tiene Bs ${entry.allocated.toFixed(2)} abonados por el cliente.`);
+      return;
+    }
+  }
   openConfirmModal("Anular venta", `¿Seguro que quieres anular la venta #${String(sale.jornadaNumber).padStart(3,'0')}? Se devolverá el stock, se descontará de la caja y quedará en el historial marcada como anulada. Esta acción no se puede deshacer.`, () => {
     requireDeletePassword(() => {
       if (state.stockEnabled){
@@ -3049,7 +3589,7 @@ function editSale(saleId){
   }));
   editingSaleId = saleId;
   editingSaleOriginal = { method: sale.method, cash: sale.cash, qr: sale.qr };
-  selectedPayMethod = sale.method;
+  selectedPayMethod = sale.method === "deuda" ? null : sale.method;
 
   switchView("newsale");
   document.querySelectorAll(".pay-btn").forEach(b => b.classList.toggle("selected", b.dataset.method === sale.method));
@@ -4250,19 +4790,20 @@ document.getElementById("stockOff").addEventListener("click", () => {
 
 // ---------- CONTRASEÑAS (Configuración avanzada / eliminaciones) ----------
 // Prompt genérico de contraseña: compara sin distinguir mayúsculas/minúsculas.
-function promptPassword(title, message, getExpectedPassword, onSuccess){
+function promptPassword(title, message, getExpectedPassword, onSuccess, opts){
+  opts = opts || {};
   showModal(`
     <h2>${title}</h2>
     <p class="muted" style="margin-bottom:10px;">${message}</p>
     <label>Contraseña</label>
-    <input type="password" id="pwInput" placeholder="••••">
+    <input type="password" id="pwInput" placeholder="••••" ${opts.numeric ? 'inputmode="numeric" pattern="[0-9]*" autocomplete="off"' : ""}>
     <p class="import-feedback" id="pwError"></p>
     <div class="modal-actions">
       <button class="modal-cancel" id="pwCancel">Cancelar</button>
       <button class="modal-confirm" id="pwOk">Confirmar</button>
     </div>
   `);
-  document.getElementById("pwCancel").addEventListener("click", closeModal);
+  document.getElementById("pwCancel").addEventListener("click", () => { closeModal(); if (opts.onCancel) opts.onCancel(); });
   document.getElementById("pwOk").addEventListener("click", () => {
     const entered = document.getElementById("pwInput").value;
     const expected = getExpectedPassword();
@@ -4281,7 +4822,7 @@ function promptPassword(title, message, getExpectedPassword, onSuccess){
 
 // Usada antes de eliminar una venta, un cierre de caja o un movimiento de dinero.
 function requireDeletePassword(onSuccess){
-  promptPassword("Contraseña requerida", "Ingresa la contraseña de eliminaciones para continuar.", () => state.deletePassword, onSuccess);
+  promptPassword("Contraseña requerida", "Ingresa la contraseña de eliminaciones para continuar.", () => state.deletePassword, onSuccess, { numeric: true });
 }
 
 document.getElementById("btnAdvancedConfig").addEventListener("click", () => {
@@ -4295,6 +4836,11 @@ function openAdvancedConfigScreen(){
       <label>Contraseña de eliminaciones</label>
       <p class="muted" style="font-size:.85rem; margin-bottom:8px;">Protege la eliminación de ventas, cierres de caja y movimientos de dinero.</p>
       <button class="btn-primary" id="btnConfigDeletePassword" style="width:fit-content;">Configurar</button>
+    </div>
+    <div class="settings-block" style="max-width:100%; margin-top:16px;">
+      <label>Contraseña de deudas</label>
+      <p class="muted" style="font-size:.85rem; margin-bottom:8px;">Se pide al guardar una venta a deuda.</p>
+      <button class="btn-primary" id="btnConfigDebtPassword" style="width:fit-content;">Configurar</button>
     </div>
     <div class="settings-block" style="max-width:100%; margin-top:16px;">
       <label>Forzar resincronización completa</label>
@@ -4327,6 +4873,7 @@ function openAdvancedConfigScreen(){
       ["Ventas de la jornada abierta (" + state.sales.length + ")", kb(state.sales)],
       ["Movimientos de caja (" + (state.cashMovements || []).length + ")", kb(state.cashMovements)],
       ["Cierres anteriores (" + state.cashClosures.length + ")", kb(state.cashClosures)],
+      ["Deudores y cobros (" + (state.debtors || []).length + " / " + (state.debtPayments || []).length + ")", kb([state.debtors, state.debtPayments])],
       ["Ventas en espera (" + state.pendingSales.length + ")", kb(state.pendingSales)],
       ["Categorías, tema y configuración", kb(meta)],
       ["   de eso, el logo", (logoLen / 1024).toFixed(1) + " KB"]
@@ -4336,6 +4883,7 @@ function openAdvancedConfigScreen(){
   })();
   document.getElementById("advConfigClose").addEventListener("click", closeModal);
   document.getElementById("btnConfigDeletePassword").addEventListener("click", openChangeDeletePasswordModal);
+  document.getElementById("btnConfigDebtPassword").addEventListener("click", openChangeDebtPasswordModal);
   document.getElementById("btnForceResync").addEventListener("click", () => {
     openConfirmModal(
       "Forzar resincronización completa",
@@ -4355,7 +4903,7 @@ function openAdvancedConfigScreen(){
 // se sube de nuevo, pero no se borra nada de lo que Firebase tenga y este
 // dispositivo no conozca.
 function forceFullResync(){
-  lastSyncSnapshot = { products: {}, sales: {}, pendingSales: {}, cashMovements: {}, cashClosures: {}, meta: null };
+  lastSyncSnapshot = { products: {}, sales: {}, pendingSales: {}, cashMovements: {}, cashClosures: {}, debtors: {}, debtPayments: {}, meta: null };
   persistSyncState();
   clearTimeout(fbPushTimer);
   pushStateToFirebase();
@@ -4363,13 +4911,14 @@ function forceFullResync(){
   alert("Resincronización enviada. En unos segundos, los demás dispositivos deberían ponerse al día automáticamente.");
 }
 
-function openChangeDeletePasswordModal(){
+// Cambio de una contraseña numérica (eliminaciones / deudas).
+function openChangeNumericPasswordModal(title, getCurrent, setNew, doneMsg){
   showModal(`
-    <h2>Contraseña de eliminaciones</h2>
+    <h2>${title}</h2>
     <label>Contraseña anterior</label>
-    <input type="password" id="oldPw" inputmode="numeric" placeholder="••••">
+    <input type="password" id="oldPw" inputmode="numeric" pattern="[0-9]*" placeholder="••••">
     <label>Nueva contraseña (solo números)</label>
-    <input type="password" id="newPw" inputmode="numeric" placeholder="••••">
+    <input type="password" id="newPw" inputmode="numeric" pattern="[0-9]*" placeholder="••••">
     <p class="import-feedback" id="pwChangeError"></p>
     <div class="modal-actions">
       <button class="modal-cancel" id="pwChangeCancel">Cancelar</button>
@@ -4381,7 +4930,7 @@ function openChangeDeletePasswordModal(){
     const oldPw = document.getElementById("oldPw").value;
     const newPw = document.getElementById("newPw").value;
     const errorEl = document.getElementById("pwChangeError");
-    if (oldPw !== state.deletePassword){
+    if (oldPw !== getCurrent()){
       errorEl.textContent = "La contraseña anterior no es correcta.";
       errorEl.className = "import-feedback error";
       return;
@@ -4391,11 +4940,17 @@ function openChangeDeletePasswordModal(){
       errorEl.className = "import-feedback error";
       return;
     }
-    state.deletePassword = newPw;
+    setNew(newPw);
     saveState();
     closeModal();
-    alert("Contraseña de eliminaciones actualizada.");
+    alert(doneMsg);
   });
+}
+function openChangeDeletePasswordModal(){
+  openChangeNumericPasswordModal("Contraseña de eliminaciones", () => state.deletePassword, (v) => { state.deletePassword = v; }, "Contraseña de eliminaciones actualizada.");
+}
+function openChangeDebtPasswordModal(){
+  openChangeNumericPasswordModal("Contraseña de deudas", () => state.debtPassword, (v) => { state.debtPassword = v; }, "Contraseña de deudas actualizada.");
 }
 
 function renderGridSizeSettings(){

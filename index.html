@@ -4,9 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>POS Shalom</title>
+<link rel="icon" id="appFavicon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%23f2a649%27/%3E%3Ctext x=%2732%27 y=%2744%27 font-size=%2738%27 font-family=%27Arial%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27%231c1406%27%3ES%3C/text%3E%3C/svg%3E">
+<link rel="apple-touch-icon" id="appTouchIcon" href="">
+<link rel="manifest" id="appManifest" href="">
+<meta name="apple-mobile-web-app-title" id="appTitleMeta" content="POS Shalom">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=202610160400">
+<link rel="stylesheet" href="style.css?v=202610160700">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
@@ -86,6 +90,14 @@
             <span class="stat-value" id="statQr">Bs 0.00</span>
           </div>
           <div class="stat-card">
+            <span class="stat-label">Quedó a deuda hoy</span>
+            <span class="stat-value" id="statOnDebt">Bs 0.00</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Cobros de deudas hoy</span>
+            <span class="stat-value" id="statDebtCollected">Bs 0.00</span>
+          </div>
+          <div class="stat-card">
             <span class="stat-label">Ventas realizadas</span>
             <span class="stat-value" id="statCount">0</span>
           </div>
@@ -146,6 +158,7 @@
               <button class="pay-btn" data-method="qr">QR</button>
               <button class="pay-btn" data-method="mixto">Mixto</button>
             </div>
+            <button class="btn-ghost debt-sale-btn" id="btnDebtSale">Venta a deuda (fiado)</button>
             <button class="btn-ghost" id="btnPendingSales" style="margin-top:10px; width:100%;">Ventas en espera</button>
           </div>
         </div>
@@ -169,6 +182,40 @@
       </section>
 
       <!-- ---------- ADMINISTRACIÓN DE CATEGORÍAS (pantalla propia) ---------- -->
+      <section class="view" id="view-debts">
+        <header class="view-header row">
+          <h1>Deuda</h1>
+          <div class="header-actions"><button class="btn-primary" id="btnDebtors">Deudores</button></div>
+        </header>
+        <div class="stat-grid">
+          <div class="stat-card accent"><span class="stat-label">Total por cobrar</span><span class="stat-value" id="debtTotalPending">Bs 0.00</span></div>
+        </div>
+        <h2 style="font-size:1.05rem; margin:18px 0 10px;">Historial de deudas</h2>
+        <div class="history-list" id="debtList"></div>
+      </section>
+      <section class="view" id="view-debtors">
+        <header class="view-header row">
+          <button class="btn-back" id="btnBackToDebts">← Volver a deuda</button>
+          <h1>Deudores</h1>
+        </header>
+        <button class="btn-primary" id="btnAddDebtor" style="margin-bottom:16px;">+ Agregar deudor</button>
+        <div class="history-list" id="debtorsList"></div>
+      </section>
+      <section class="view" id="view-debtdetail">
+        <header class="view-header row">
+          <button class="btn-back" id="btnBackToDebtsFromDetail">← Volver a deuda</button>
+          <h1 id="debtDetailTitle">Cliente</h1>
+        </header>
+        <p class="muted" id="debtDetailMeta" style="margin-bottom:12px;"></p>
+        <div class="stat-grid">
+          <div class="stat-card accent"><span class="stat-label">Deuda pendiente</span><span class="stat-value" id="debtDetailBalance">Bs 0.00</span></div>
+        </div>
+        <button class="btn-primary" id="btnDebtDetailPay" style="margin:14px 0;">Pagar</button>
+        <h2 style="font-size:1.05rem; margin:10px 0;">Compras a deuda</h2>
+        <div class="history-list" id="debtPurchases"></div>
+        <h2 style="font-size:1.05rem; margin:18px 0 10px;">Pagos realizados</h2>
+        <div class="history-list" id="debtPaymentsList"></div>
+      </section>
       <section class="view" id="view-subcategories">
         <header class="view-header row">
           <button class="btn-back" id="btnBackToProductsFromSub">← Volver a productos</button>
@@ -373,6 +420,6 @@
 
   <div class="toast" id="posToast"></div>
 
-  <script src="app.js?v=202610160400"></script>
+  <script src="app.js?v=202610160700"></script>
 </body>
 </html>
