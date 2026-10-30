@@ -510,3 +510,17 @@ input{font-family:inherit;}
 /* Iconos de contraseñas y deuda anulada */
 .pw-icon{font-size:1.15em; margin-left:4px;}
 .debt-tag.anulada{background:#616161; color:#fff;}
+
+/* Combos */
+.combo-lines{display:flex; flex-direction:column; gap:1px; font-size:.72rem; opacity:.9; margin-top:4px; text-align:center;}
+.admin-prod-info .combo-lines{text-align:left; font-size:.8rem; opacity:.85;}
+.combo-item-row{display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border, rgba(255,255,255,.1));}
+.combo-item-main{flex:1; min-width:0;}
+.combo-results{max-height:200px; overflow:auto; margin-top:6px;}
+#comboFormBody label{display:block; font-size:.82rem; color:var(--text-muted); margin:12px 0 6px;}
+#comboFormBody input:not(.qty-input){
+  width:100%; box-sizing:border-box; background:var(--panel-2); border:1px solid var(--border); border-radius:8px;
+  padding:10px; color:var(--text); font-size:1rem;
+}
+#comboFormBody .debt-two-cols > div{min-width:0;}
+#comboFormBody .modal-actions{margin-top:22px;}

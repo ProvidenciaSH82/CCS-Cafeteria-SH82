@@ -37,10 +37,13 @@ const firebaseConfig = {
   messagingSenderId: "828798106418",
   appId: "1:828798106418:web:e3eeccf7bf169282d2f52b"
 };
+// Versión de respaldo: el index.html de respaldo define window.POS_OFFLINE = true
+// y no carga Firebase. Todo funciona igual, pero solo con los datos de este dispositivo.
+const OFFLINE_MODE = !!window.POS_OFFLINE;
 let fbReady = false;
 let fbRootRef = null;
 try {
-  if (typeof firebase !== "undefined"){
+  if (!OFFLINE_MODE && typeof firebase !== "undefined"){
     firebase.initializeApp(firebaseConfig);
     fbRootRef = firebase.database().ref("posShalomState");
     fbReady = true;
@@ -113,7 +116,8 @@ let fbStatus = "init"; // "init" | "ok" | "error" — se muestra en pantalla par
 // estaban compartiendo con los demás.
 function setFbStatus(status){
   fbStatus = status;
-  const label = status === "ok" ? "☁ Sincronizado"
+  const label = OFFLINE_MODE ? "💾 Modo respaldo (sin nube)"
+    : status === "ok" ? "☁ Sincronizado"
     : status === "error" ? "⚠ Sin conexión con la nube"
     : "☁ Conectando...";
   document.querySelectorAll(".fb-status-dot").forEach(el => { el.textContent = label; });
@@ -125,6 +129,7 @@ let state = {
   categories: [],   // { id, name, bgColor?, textColor? }  (el orden del arreglo = orden de visualización)
   devices: [],      // { id, name, firstSeen, lastSeen, info }  dispositivos que han entrado (nombre puesto por el dueño)
   deviceNamesEnabled: false, // si es true, el historial muestra "Vendedor: nombre"
+  stockGroups: [],  // { id, name, members:[{productId, factor}] }  agrupaciones de stock compartido (en meta)
   subcategories: [],// { id, name, categoryId, bgColor?, textColor? }  (orden del arreglo = orden dentro de su categoría)
   products: [],     // { id, name, price, cost, categoryId, hidden, stock, stockMin, stockTracked }
   sales: [],        // { id, jornadaNumber, date, name, items:[...], subtotal, discount, total, method, cash, qr, delivery:{...}, deleted }
@@ -165,6 +170,13 @@ function defaultGridSizes(){
 function generateDeliveryUnits(items, delivered){
   const units = [];
   items.forEach(i => {
+    if (i.parts && i.parts.length){
+      // Un combo se entrega por sus productos (cada pieza del combo es una unidad).
+      i.parts.forEach(pt => {
+        units.push({ name: pt.name, delivered: !!delivered, answers: pt.answers || [], combo: i.name });
+      });
+      return;
+    }
     for (let k = 0; k < i.qty; k++){
       units.push({
         name: i.name,
@@ -266,6 +278,7 @@ function normalizeSnapshotDefaults(){
   if (lastSyncSnapshot.meta){
     delete lastSyncSnapshot.meta.selectedGridSizeIndex;
     if (!lastSyncSnapshot.meta.subcategories) lastSyncSnapshot.meta.subcategories = [];
+    if (!lastSyncSnapshot.meta.stockGroups) lastSyncSnapshot.meta.stockGroups = [];
     if (!lastSyncSnapshot.meta.devices) lastSyncSnapshot.meta.devices = [];
     if (lastSyncSnapshot.meta.deviceNamesEnabled === undefined) lastSyncSnapshot.meta.deviceNamesEnabled = false;
   }
@@ -274,6 +287,7 @@ function normalizeSnapshotDefaults(){
 function applyDefaultsAndMigrations(){
   if (!state.pendingSales) state.pendingSales = [];
   if (!Array.isArray(state.subcategories)) state.subcategories = [];
+  if (!Array.isArray(state.stockGroups)) state.stockGroups = [];
   if (!Array.isArray(state.devices)) state.devices = [];
   if (state.deviceNamesEnabled === undefined) state.deviceNamesEnabled = false;
   // Subcategorías huérfanas (su categoría ya no existe) no se muestran en ningún lado.
@@ -424,6 +438,7 @@ function buildMetaObject(){
     businessName: state.businessName,
     categories: state.categories,
     subcategories: state.subcategories || [],
+    stockGroups: state.stockGroups || [],
     devices: state.devices || [],
     deviceNamesEnabled: !!state.deviceNamesEnabled,
     gridSizes: state.gridSizes,
@@ -457,7 +472,7 @@ function encodeMetaForFirebase(metaObj){
   Object.keys(out).forEach(key => {
     if (out[key] === null) out[key] = FB_NULL_MARKER;
   });
-  ["categories", "subcategories", "devices"].forEach(k => {
+  ["categories", "subcategories", "devices", "stockGroups"].forEach(k => {
     if (Array.isArray(out[k]) && out[k].length === 0) out[k] = FB_EMPTY_ARRAY_MARKER;
   });
   return out;
@@ -468,7 +483,7 @@ function decodeMetaFromFirebase(remoteMeta){
   Object.keys(out).forEach(key => {
     if (out[key] === FB_NULL_MARKER) out[key] = null;
   });
-  ["categories", "subcategories", "devices"].forEach(k => {
+  ["categories", "subcategories", "devices", "stockGroups"].forEach(k => {
     if (out[k] === FB_EMPTY_ARRAY_MARKER) out[k] = [];
     // Firebase puede devolver arreglos como objetos si faltan índices.
     else if (out[k] && typeof out[k] === "object" && !Array.isArray(out[k])) out[k] = Object.values(out[k]);
@@ -844,7 +859,7 @@ function mergeMetaWithRemote(remoteMeta, lastSyncedMeta){
     // se considera "pendiente" solo por esa diferencia de tipo.
     const norm = (v) => (v === undefined ? null : v);
     const pending = stableStringify(norm(curVal)) !== stableStringify(norm(lastVal));
-    if (pending && (key === "categories" || key === "subcategories" || key === "devices") && Array.isArray(remVal) && Array.isArray(curVal)){
+    if (pending && (key === "categories" || key === "subcategories" || key === "devices" || key === "stockGroups") && Array.isArray(remVal) && Array.isArray(curVal)){
       merged[key] = mergeIdLists(curVal, lastVal, remVal);
     } else if (pending){
       merged[key] = curVal; // cambio propio (p.ej. un cierre de caja) sin subir todavía: se respeta
@@ -912,6 +927,7 @@ function adoptRemoteDirectly(remote){
     state.categories = decodedMeta.categories ? deepClone(decodedMeta.categories) : state.categories;
     state.subcategories = decodedMeta.subcategories ? deepClone(decodedMeta.subcategories) : (state.subcategories || []);
     state.devices = decodedMeta.devices ? deepClone(decodedMeta.devices) : (state.devices || []);
+    state.stockGroups = decodedMeta.stockGroups ? deepClone(decodedMeta.stockGroups) : (state.stockGroups || []);
     state.deviceNamesEnabled = decodedMeta.deviceNamesEnabled !== undefined ? !!decodedMeta.deviceNamesEnabled : !!state.deviceNamesEnabled;
     state.gridSizes = (decodedMeta.gridSizes && decodedMeta.gridSizes.length) ? deepClone(decodedMeta.gridSizes) : state.gridSizes;
     state.cashRegister = decodedMeta.cashRegister !== undefined ? deepClone(decodedMeta.cashRegister) : state.cashRegister;
@@ -956,6 +972,7 @@ function applyRemoteSnapshot(remote){
       state.categories = mergedMeta.categories || state.categories;
       state.subcategories = mergedMeta.subcategories || state.subcategories || [];
       state.devices = mergedMeta.devices || state.devices || [];
+      state.stockGroups = mergedMeta.stockGroups || state.stockGroups || [];
       state.deviceNamesEnabled = mergedMeta.deviceNamesEnabled !== undefined ? !!mergedMeta.deviceNamesEnabled : !!state.deviceNamesEnabled;
       state.gridSizes = (mergedMeta.gridSizes && mergedMeta.gridSizes.length) ? mergedMeta.gridSizes : state.gridSizes;
       state.cashRegister = mergedMeta.cashRegister !== undefined ? mergedMeta.cashRegister : state.cashRegister;
@@ -1375,6 +1392,8 @@ function switchView(viewName){
   if (viewName === "deliverydetail") renderDeliveryDetail();
   if (viewName === "visibility") renderVisibilityScreen();
   if (viewName === "categories") renderCategoryAdminList();
+  if (viewName === "stockgroups") renderStockGroups();
+  if (viewName === "combos") renderCombosList();
   if (viewName === "debts") renderDebts();
   if (viewName === "debtors") renderDebtors();
   if (viewName === "debtdetail") renderDebtDetail();
@@ -2180,8 +2199,118 @@ function stockAppliesTo(prod){
 }
 function isProductAvailableForSale(p){
   if (p.hidden) return false;
-  if (stockAppliesTo(p) && (p.stock || 0) <= 0) return false;
-  return true;
+  return unitsAvailable(p) >= 1;
+}
+
+// ---------- STOCK COMPARTIDO (agrupaciones) y DEMANDA de stock ----------
+// Una agrupación junta varios productos que gastan el MISMO insumo (por ejemplo,
+// carnes para distintas hamburguesas). Todos los productos del grupo guardan el
+// mismo número de stock (el "stock compartido"), y cada producto descuenta su
+// propio factor (la doble descuenta 2, la simple 1...).
+function stockGroupOf(pid){
+  return (state.stockGroups || []).find(g => (g.members || []).some(m => m.productId === pid)) || null;
+}
+function stockFactorOf(pid){
+  const g = stockGroupOf(pid);
+  if (!g) return 1;
+  const m = g.members.find(x => x.productId === pid);
+  return Math.max(1, Math.floor(Number(m && m.factor) || 1));
+}
+function stockGroupProducts(g){
+  return (g.members || []).map(m => state.products.find(p => p.id === m.productId)).filter(Boolean);
+}
+// Suma/resta una cantidad al stock de un producto (y de todo su grupo).
+function changeStockOf(p, delta){
+  const g = stockGroupOf(p.id);
+  const targets = g ? stockGroupProducts(g) : [p];
+  targets.forEach(t => { t.stock = (t.stock || 0) + delta; });
+}
+function setStockOf(p, value){
+  const g = stockGroupOf(p.id);
+  const targets = g ? stockGroupProducts(g) : [p];
+  targets.forEach(t => { t.stock = value; });
+}
+// Deja todo el grupo en el menor stock que tenga cualquiera de sus productos.
+function normalizeStockGroup(g){
+  const prods = stockGroupProducts(g).filter(p => p.stockTracked);
+  if (prods.length < 2) return false;
+  const min = Math.min.apply(null, prods.map(p => p.stock || 0));
+  let changed = false;
+  prods.forEach(p => { if ((p.stock || 0) !== min){ p.stock = min; changed = true; } });
+  return changed;
+}
+function normalizeAllStockGroups(){
+  let changed = false;
+  (state.stockGroups || []).forEach(g => { if (normalizeStockGroup(g)) changed = true; });
+  return changed;
+}
+// Cuántas unidades de ESTE producto se pueden vender todavía por su propio
+// stock (sin mirar componentes de combos).
+function ownUnitsAvailable(p){
+  if (!stockAppliesTo(p)) return Infinity;
+  return Math.floor(Math.max(0, p.stock || 0) / stockFactorOf(p.id));
+}
+// Unidades vendibles de un producto o combo (un combo también depende del
+// stock de cada uno de sus productos).
+function unitsAvailable(p){
+  let n = ownUnitsAvailable(p);
+  if (p.combo && Array.isArray(p.combo.items)){
+    p.combo.items.forEach(c => {
+      const cp = state.products.find(x => x.id === c.productId);
+      if (!cp) return;
+      n = Math.min(n, Math.floor(ownUnitsAvailable(cp) / Math.max(1, c.qty || 1)));
+    });
+  }
+  return n;
+}
+// Productos de un combo guardados dentro de una línea de venta/carrito.
+function comboItemsOfLine(line){
+  if (line.comboItems) return line.comboItems;
+  const prod = state.products.find(p => p.id === line.productId);
+  return prod && prod.combo && prod.combo.items ? prod.combo.items.map(c => c.fixed ? { productId: c.productId, qty: c.qty, fixed: deepClone(c.fixed) } : { productId: c.productId, qty: c.qty }) : null;
+}
+// Qué productos (y cuántas unidades de cada uno) gasta una lista de líneas
+// {productId, qty, comboItems?}: la línea misma + los componentes de un combo.
+function demandOfItems(items){
+  const map = new Map();
+  const add = (pid, q) => map.set(pid, (map.get(pid) || 0) + q);
+  items.forEach(i => {
+    add(i.productId, i.qty);
+    const ci = comboItemsOfLine(i);
+    if (ci) ci.forEach(c => add(c.productId, (c.qty || 1) * i.qty));
+  });
+  return map;
+}
+// Agrupa la demanda por "caja de stock" (un producto suelto, o todo un grupo).
+function stockNeedsOf(demand){
+  const needs = new Map();
+  demand.forEach((units, pid) => {
+    const prod = state.products.find(p => p.id === pid);
+    if (!stockAppliesTo(prod)) return;
+    const g = stockGroupOf(pid);
+    const key = g ? "g:" + g.id : "p:" + pid;
+    const e = needs.get(key) || { need: 0, prod, group: g };
+    e.need += units * (g ? stockFactorOf(pid) : 1);
+    needs.set(key, e);
+  });
+  return needs;
+}
+function checkStockDemand(demand){
+  const needs = stockNeedsOf(demand);
+  for (const e of needs.values()){
+    const pool = e.group
+      ? Math.min.apply(null, stockGroupProducts(e.group).filter(p => p.stockTracked).map(p => p.stock || 0))
+      : (e.prod.stock || 0);
+    if (e.need > pool) return { ok: false, name: e.prod.name, available: Math.floor(Math.max(0, pool) / stockFactorOf(e.prod.id)) };
+  }
+  return { ok: true };
+}
+// sign = -1 descuenta, +1 devuelve.
+function applyStockDemand(demand, sign){
+  stockNeedsOf(demand).forEach(e => { changeStockOf(e.prod, sign * e.need); });
+}
+function cartLinesForStock(){
+  return state.cart.map(i => ({ productId: i.productId, qty: i.qty, comboItems: i.comboItems }));
 }
 
 // ---------- NUEVA VENTA: CATEGORÍAS / PRODUCTOS ----------
@@ -2307,6 +2436,7 @@ function renderProductGrid(catId, subId){
     btn.innerHTML = `
       <span class="name">${p.name}</span>
       <span class="price">Bs ${p.price.toFixed(2)}</span>
+      ${p.combo ? comboLinesHtml(p) : ""}
       ${lowStock ? `<span class="stock-warning">⚠ Stock: ${p.stock}</span>` : ""}
     `;
     btn.addEventListener("click", () => addToCart(p.id));
@@ -2321,13 +2451,25 @@ document.getElementById("btnBackToCats").addEventListener("click", () => {
   else renderCategories();
 });
 
+function comboLinesHtml(p){
+  if (!p.combo || !p.combo.items) return "";
+  return `<span class="combo-lines">${p.combo.items.map(c => {
+    const cp = state.products.find(x => x.id === c.productId);
+    const fx = c.fixed && cp && cp.questions ? cp.questions.map(q => c.fixed[q.id]).filter(Boolean).join(", ") : "";
+    return `<span>${c.qty}× ${escapeHtml(cp ? cp.name : "(eliminado)")}${fx ? " (" + escapeHtml(fx) + ")" : ""}</span>`;
+  }).join("")}</span>`;
+}
+
 // ---------- CARRITO ----------
 function addToCart(productId){
   const prod = state.products.find(p => p.id === productId);
   const existing = state.cart.find(i => i.productId === productId);
-  const currentQty = existing ? existing.qty : 0;
-  if (stockAppliesTo(prod) && currentQty + 1 > (prod.stock || 0)){
-    alert(`No hay suficiente stock de "${prod.name}". Disponible: ${prod.stock || 0}.`);
+  const lines = cartLinesForStock();
+  if (existing) lines.find(l => l.productId === productId).qty += 1;
+  else lines.push({ productId, qty: 1, comboItems: comboItemsOfLine({ productId }) || undefined });
+  const chk = checkStockDemand(demandOfItems(lines));
+  if (!chk.ok){
+    alert(`No hay suficiente stock de "${chk.name}". Disponible: ${chk.available}.`);
     return;
   }
   if (existing){
@@ -2341,6 +2483,8 @@ function addToCart(productId){
       productId, name: prod.name, price: prod.price, qty: 1, discountType: null, discountValue: 0,
       unitSelections: prod.advanced ? [null] : []
     });
+    const ciNew = comboItemsOfLine({ productId });
+    if (ciNew) state.cart[state.cart.length - 1].comboItems = ciNew;
   }
   renderCart();
 }
@@ -2427,8 +2571,11 @@ function setItemQty(productId, newQty){
   if (!item) return false;
   if (!Number.isInteger(newQty) || newQty <= 0) return false;
   const prod = state.products.find(p => p.id === productId);
-  if (stockAppliesTo(prod) && newQty > (prod.stock || 0)){
-    alert(`No hay suficiente stock de "${prod.name}". Disponible: ${prod.stock || 0}.`);
+  const lines = cartLinesForStock();
+  lines.find(l => l.productId === productId).qty = newQty;
+  const chk = checkStockDemand(demandOfItems(lines));
+  if (!chk.ok){
+    alert(`No hay suficiente stock de "${chk.name}". Disponible: ${chk.available}.`);
     return false;
   }
   item.qty = newQty;
@@ -2607,8 +2754,40 @@ let pendingPayMethodAfterSelections = null;
 function cartNeedsAdvancedSelections(){
   return state.cart.some(item => {
     const prod = state.products.find(p => p.id === item.productId);
-    return prod && prod.advanced && prod.questions && prod.questions.length > 0;
+    if (prod && prod.advanced && prod.questions && prod.questions.length > 0) return true;
+    return comboSlotsNeedingConfig(item).length > 0;
   });
+}
+
+// ---------- COMBOS: piezas que hay que configurar al vender ----------
+// Un combo vendido tiene, por cada unidad del combo, una "pieza" por cada
+// unidad de cada producto que lo forma. Las piezas de productos con preguntas
+// (sabor, etc.) que NO se fijaron al crear el combo las elige el cliente al cobrar.
+function comboQuestionsOf(c){
+  const cp = state.products.find(x => x.id === c.productId);
+  return cp && cp.advanced && cp.questions && cp.questions.length ? cp.questions : [];
+}
+function comboFixedComplete(c){
+  const qs = comboQuestionsOf(c);
+  return qs.length > 0 && !!c.fixed && qs.every(q => c.fixed[q.id]);
+}
+function comboSlotsOf(line){
+  const slots = [];
+  const items = line.comboItems || [];
+  if (!items.length) return slots;
+  for (let u = 0; u < line.qty; u++){
+    items.forEach((c, ci) => {
+      for (let k = 0; k < (c.qty || 1); k++) slots.push({ key: u + ":" + ci + ":" + k, u, ci, k, comp: c });
+    });
+  }
+  return slots;
+}
+function comboSlotsNeedingConfig(line){
+  return comboSlotsOf(line).filter(sl => comboQuestionsOf(sl.comp).length > 0 && !comboFixedComplete(sl.comp));
+}
+function comboSlotSelection(line, sl){
+  if (comboFixedComplete(sl.comp)) return sl.comp.fixed;
+  return (line.comboSel && line.comboSel[sl.key]) || null;
 }
 
 function openPayModal(method){
@@ -2660,8 +2839,20 @@ function openAdvancedSelectionsModal(){
     }
   });
 
+  state.cart.forEach(item => {
+    comboSlotsNeedingConfig(item).forEach(sl => {
+      const cp = state.products.find(x => x.id === sl.comp.productId);
+      const qs = comboQuestionsOf(sl.comp);
+      const sel = item.comboSel && item.comboSel[sl.key];
+      const complete = !!sel && qs.every(q => sel[q.id]);
+      const unitTxt = item.qty > 1 ? ` ${sl.u + 1}` : "";
+      const partTxt = (sl.comp.qty || 1) > 1 ? ` ${sl.k + 1}` : "";
+      rows.push({ productId: item.productId, comboKey: sl.key, label: `${item.name}${unitTxt} — ${cp ? cp.name : "?"}${partTxt}`, complete });
+    });
+  });
+
   const rowsHtml = rows.map(r => `
-    <button type="button" class="unit-btn" data-config-unit="${r.productId}::${r.unitIndex}">
+    <button type="button" class="unit-btn" data-config-unit="${r.comboKey ? "combo::" + r.productId + "::" + r.comboKey : r.productId + "::" + r.unitIndex}">
       <span class="unit-name">${r.label} ${r.complete ? "✓" : "⚠ Falta configurar"}</span>
     </button>
   `).join("");
@@ -2678,8 +2869,9 @@ function openAdvancedSelectionsModal(){
   document.getElementById("advSelCancel").addEventListener("click", closeModal);
   document.querySelectorAll("[data-config-unit]").forEach(b => {
     b.addEventListener("click", () => {
-      const [pid, uidx] = b.dataset.configUnit.split("::");
-      openUnitConfigModal(pid, parseInt(uidx));
+      const parts = b.dataset.configUnit.split("::");
+      if (parts[0] === "combo") openComboPartConfigModal(parts[1], parts[2]);
+      else openUnitConfigModal(parts[0], parseInt(parts[1]));
     });
   });
   document.getElementById("advSelContinue").addEventListener("click", () => {
@@ -2691,6 +2883,45 @@ function openAdvancedSelectionsModal(){
     }
     closeModal();
     openSpecificPayModal(pendingPayMethodAfterSelections);
+  });
+}
+
+function openComboPartConfigModal(productId, key){
+  const item = state.cart.find(i => i.productId === productId);
+  if (!item) return;
+  const sl = comboSlotsOf(item).find(x => x.key === key);
+  if (!sl) return;
+  const qs = comboQuestionsOf(sl.comp);
+  const cp = state.products.find(x => x.id === sl.comp.productId);
+  if (!item.comboSel) item.comboSel = {};
+  if (!item.comboSel[key]) item.comboSel[key] = {};
+  const sel = item.comboSel[key];
+  const label = `${item.name}${item.qty > 1 ? " " + (sl.u + 1) : ""} — ${cp ? cp.name : ""}${(sl.comp.qty || 1) > 1 ? " " + (sl.k + 1) : ""}`;
+  const questionsHtml = qs.map(q => `
+    <p style="font-weight:600; margin:14px 0 8px;">${q.text}</p>
+    <div class="option-group" data-question="${q.id}">
+      ${q.options.map(opt => `<button type="button" class="option-btn ${sel[q.id]===opt?'selected':''}" data-option="${opt}">${opt}</button>`).join("")}
+    </div>
+  `).join("");
+  showModal(`
+    <h2>${label}</h2>
+    ${questionsHtml}
+    <div class="modal-actions">
+      <button class="modal-confirm" id="unitConfigOk" style="flex:1;">OK</button>
+    </div>
+  `);
+  document.querySelectorAll(".option-group").forEach(group => {
+    const qid = group.dataset.question;
+    group.querySelectorAll(".option-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        sel[qid] = btn.dataset.option;
+        group.querySelectorAll(".option-btn").forEach(b => b.classList.toggle("selected", b.dataset.option === sel[qid]));
+      });
+    });
+  });
+  document.getElementById("unitConfigOk").addEventListener("click", () => {
+    closeModal();
+    openAdvancedSelectionsModal();
   });
 }
 
@@ -2854,13 +3085,7 @@ function openMixModal(total, prefillCash){
 
 // ---------- VALIDACIÓN DE STOCK AL COBRAR ----------
 function validateStockForCart(){
-  for (const item of state.cart){
-    const prod = state.products.find(p => p.id === item.productId);
-    if (stockAppliesTo(prod) && item.qty > (prod.stock || 0)){
-      return { ok: false, name: prod.name, available: prod.stock || 0 };
-    }
-  }
-  return { ok: true };
+  return checkStockDemand(demandOfItems(cartLinesForStock()));
 }
 
 // ---------- COBRAR / MODIFICAR PEDIDO ----------
@@ -2920,6 +3145,19 @@ async function finalizeSaleInner(name, method, cash, qr, debt){
           .map(q => ({ questionId: q.id, question: q.text, answer: sel[q.id] }));
       });
     }
+    // Combo: se congelan las piezas que lo forman (y sus respuestas) para el
+    // historial y la entrega de pedidos.
+    if (i.comboItems && i.comboItems.length){
+      snap.comboItems = deepClone(i.comboItems);
+      snap.parts = comboSlotsOf(i).map(sl => {
+        const cp = state.products.find(x => x.id === sl.comp.productId);
+        const sel = comboSlotSelection(i, sl);
+        const qs = comboQuestionsOf(sl.comp);
+        const answers = sel ? qs.filter(q => sel[q.id]).map(q => ({ questionId: q.id, question: q.text, answer: sel[q.id] })) : [];
+        return Object.assign({ productId: sl.comp.productId, name: cp ? cp.name : "?" }, answers.length ? { answers } : {});
+      });
+      delete snap.comboSel;
+    }
     return snap;
   });
 
@@ -2928,26 +3166,17 @@ async function finalizeSaleInner(name, method, cash, qr, debt){
 
     if (state.stockEnabled){
       // 1) Se devuelve el stock que había reservado la venta original
-      sale.items.forEach(oi => {
-        const prod = state.products.find(p => p.id === oi.productId);
-        if (stockAppliesTo(prod)) prod.stock = (prod.stock || 0) + oi.qty;
-      });
+      applyStockDemand(demandOfItems(sale.items), +1);
       // 2) Se valida el carrito editado contra el stock ya restituido
       const check = validateStockForCart();
       if (!check.ok){
         // Se revierte la devolución para no dejar el stock inconsistente
-        sale.items.forEach(oi => {
-          const prod = state.products.find(p => p.id === oi.productId);
-          if (stockAppliesTo(prod)) prod.stock = (prod.stock || 0) - oi.qty;
-        });
+        applyStockDemand(demandOfItems(sale.items), -1);
         alert(`No hay suficiente stock de "${check.name}". Disponible: ${check.available}.`);
         return;
       }
       // 3) Se descuenta el stock según el carrito ya editado
-      state.cart.forEach(ci => {
-        const prod = state.products.find(p => p.id === ci.productId);
-        if (stockAppliesTo(prod)) prod.stock -= ci.qty;
-      });
+      applyStockDemand(demandOfItems(cartLinesForStock()), -1);
     }
 
     sale.items = itemsSnapshot;
@@ -2967,10 +3196,7 @@ async function finalizeSaleInner(name, method, cash, qr, debt){
         alert(`No hay suficiente stock de "${check.name}". Disponible: ${check.available}.`);
         return;
       }
-      state.cart.forEach(ci => {
-        const prod = state.products.find(p => p.id === ci.productId);
-        if (stockAppliesTo(prod)) prod.stock -= ci.qty;
-      });
+      applyStockDemand(demandOfItems(cartLinesForStock()), -1);
     }
 
     // El id interno nunca se reinicia (identifica la venta de forma única para
@@ -3556,8 +3782,13 @@ function viewSale(saleId){
       const lines = ans.map(a => `<div class="muted" style="font-size:.8rem;">${a.question} - ${a.answer}</div>`).join("");
       return `<div style="margin:4px 0 6px 10px;"><strong style="font-size:.85rem;">${label}</strong>${lines}</div>`;
     }).join("");
+    const partsHtml = (i.parts || []).map(pt => {
+      const ans = (pt.answers || []).map(a => a.answer).join(", ");
+      return `<div class="muted" style="font-size:.8rem; margin-left:10px;">• ${escapeHtml(pt.name)}${ans ? " — " + escapeHtml(ans) : ""}</div>`;
+    }).join("");
     return `
       <div class="pay-line"><span>${i.name} x${i.qty}</span><span>Bs ${(i.finalPrice*i.qty).toFixed(2)}</span></div>
+      ${partsHtml}
       ${answersHtml}
     `;
   }).join("");
@@ -3596,10 +3827,7 @@ function deleteSale(saleId){
   openConfirmModal("Anular venta", `¿Seguro que quieres anular la venta #${String(sale.jornadaNumber).padStart(3,'0')}? Se devolverá el stock, se descontará de la caja y quedará en el historial marcada como anulada. Esta acción no se puede deshacer.`, () => {
     requireDeletePassword(() => {
       if (state.stockEnabled){
-        sale.items.forEach(i => {
-          const prod = state.products.find(p => p.id === i.productId);
-          if (stockAppliesTo(prod)) prod.stock = (prod.stock || 0) + i.qty;
-        });
+        applyStockDemand(demandOfItems(sale.items), +1);
       }
       sale.deleted = true;
       sale.deletedAt = new Date().toISOString();
@@ -3607,6 +3835,20 @@ function deleteSale(saleId){
       renderHistory();
     });
   }, true, {}, true);
+}
+
+// Reconstruye las elecciones de las piezas de un combo a partir de lo guardado en la venta.
+function restoreComboSel(saleItem){
+  const sel = {};
+  const slots = comboSlotsOf(saleItem);
+  slots.forEach((sl, idx) => {
+    const pt = (saleItem.parts || [])[idx];
+    if (!pt || !pt.answers || !pt.answers.length || comboFixedComplete(sl.comp)) return;
+    const obj = {};
+    pt.answers.forEach(a => { obj[a.questionId] = a.answer; });
+    sel[sl.key] = obj;
+  });
+  return sel;
 }
 
 function editSale(saleId){
@@ -3623,7 +3865,8 @@ function editSale(saleId){
       const obj = {};
       ans.forEach(a => { obj[a.questionId] = a.answer; });
       return obj;
-    })
+    }),
+    ...(i.comboItems ? { comboItems: deepClone(i.comboItems), comboSel: restoreComboSel(i) } : {})
   }));
   editingSaleId = saleId;
   editingSaleOriginal = { method: sale.method, cash: sale.cash, qr: sale.qr };
@@ -3706,8 +3949,9 @@ function renderAdminProductRows(wrap, prods){
     row.className = "admin-prod-row" + (p.hidden ? " hidden-product" : "");
     row.innerHTML = `
       <div class="admin-prod-info">
-        <span class="admin-prod-name">${p.name}${p.hidden ? " (oculto)" : ""}</span>
+        <span class="admin-prod-name">${p.name}${p.hidden ? " (oculto)" : ""}${p.combo ? ' <span class="tag">Combo</span>' : ""}</span>
         <span class="admin-prod-meta">Precio: Bs ${p.price.toFixed(2)} · Costo: Bs ${(p.cost||0).toFixed(2)}</span>
+        ${p.combo ? comboLinesHtml(p) : ""}
         ${state.stockEnabled ? `<span class="admin-prod-meta">${p.stockTracked ? "Stock: " + p.stock + " · Stock mínimo: " + p.stockMin : "Sin control de stock"}</span>` : ""}
       </div>
       <div class="admin-prod-actions">
@@ -3734,6 +3978,8 @@ function bindAdminProductActions(wrap, catId){
   wrap.querySelectorAll("[data-delete-prod]").forEach(b => b.addEventListener("click", () => {
     openConfirmModal("Eliminar producto", "¿Seguro que quieres eliminar este producto?", () => {
       state.products = state.products.filter(p => p.id !== b.dataset.deleteProd);
+      removeProductFromStockGroups(b.dataset.deleteProd);
+      cleanupComboCategory();
       saveState(); renderProductAdminList(catId);
     }, true, {}, true);
   }));
@@ -3816,6 +4062,7 @@ document.getElementById("btnAddProduct").addEventListener("click", () => {
 function openEditProductModal(productId){
   const p = state.products.find(x => x.id === productId);
   if (!p) return;
+  if (p.combo){ openComboForm(p.id); return; }
   productFormDraft = {
     mode: "edit", productId: p.id, categoryId: p.categoryId, subcategoryId: effectiveSubId(p), name: p.name, price: p.price, cost: p.cost || 0,
     stockMin: p.stockMin || 0, stockTracked: !!p.stockTracked, hidden: p.hidden,
@@ -4371,6 +4618,40 @@ function deleteCategory(catId){
 }
 
 // ---------- STOCK ----------
+// Grupos de productos de una categoría: primero cada subcategoría (en su
+// orden), al final los que no tienen subcategoría.
+function productGroupsOfCategory(cat){
+  const subs = subcategoriesOf(cat.id);
+  const all = productsInCategory(cat.id);
+  const groups = [];
+  subs.forEach(sc => {
+    const prods = all.filter(p => effectiveSubId(p) === sc.id);
+    if (prods.length) groups.push({ title: sc.name, prods });
+  });
+  const none = all.filter(p => !effectiveSubId(p));
+  if (none.length) groups.push({ title: subs.length ? "Sin subcategoría" : null, prods: none });
+  return groups;
+}
+function stockRowElement(p){
+  const low = p.stockTracked && p.stock <= p.stockMin;
+  const g = stockGroupOf(p.id);
+  const f = stockFactorOf(p.id);
+  const row = document.createElement("div");
+  row.className = "admin-prod-row";
+  row.innerHTML = `
+    <div class="admin-prod-info">
+      <span class="admin-prod-name">${p.name} ${g ? '<span class="tag">Agrupado</span>' : ''} ${!p.stockTracked ? '<span class="tag">Sin control</span>' : ''} ${low ? '<span class="tag danger">STOCK BAJO</span>' : ''}</span>
+      <span class="admin-prod-meta">${g ? "Stock compartido (" + escapeHtml(g.name) + "): " + p.stock + (f > 1 ? " · cada unidad descuenta " + f : "") : "Stock actual: " + p.stock} · Stock mínimo: ${p.stockMin}</span>
+    </div>
+    <div class="admin-prod-actions">
+      <button class="mini-btn" data-stock-add="${p.id}">Añadir</button>
+      <button class="mini-btn" data-stock-remove="${p.id}">Quitar</button>
+      <button class="mini-btn" data-stock-toggle="${p.id}">${p.stockTracked ? "Desactivar" : "Activar"} stock</button>
+      <button class="mini-btn danger" data-stock-clear="${p.id}">Vaciar stock</button>
+    </div>
+  `;
+  return row;
+}
 function renderStockScreen(){
   const wrap = document.getElementById("stockList");
   wrap.innerHTML = "";
@@ -4379,29 +4660,20 @@ function renderStockScreen(){
     return;
   }
   state.categories.forEach(cat => {
-    const prods = productsInCategory(cat.id);
     const block = document.createElement("div");
     block.className = "admin-cat";
     block.innerHTML = `<h3>${cat.name}</h3>`;
-    prods.forEach(p => {
-      const low = p.stockTracked && p.stock <= p.stockMin;
-      const row = document.createElement("div");
-      row.className = "admin-prod-row";
-      row.innerHTML = `
-        <div class="admin-prod-info">
-          <span class="admin-prod-name">${p.name}${subcategoryName(p) ? ' <span class="tag">' + escapeHtml(subcategoryName(p)) + '</span>' : ''} ${!p.stockTracked ? '<span class="tag">Sin control</span>' : ''} ${low ? '<span class="tag danger">STOCK BAJO</span>' : ''}</span>
-          <span class="admin-prod-meta">Stock actual: ${p.stock} · Stock mínimo: ${p.stockMin}</span>
-        </div>
-        <div class="admin-prod-actions">
-          <button class="mini-btn" data-stock-add="${p.id}">Añadir</button>
-          <button class="mini-btn" data-stock-remove="${p.id}">Quitar</button>
-          <button class="mini-btn" data-stock-toggle="${p.id}">${p.stockTracked ? "Desactivar" : "Activar"} stock</button>
-          <button class="mini-btn danger" data-stock-clear="${p.id}">Vaciar stock</button>
-        </div>
-      `;
-      block.appendChild(row);
+    const groups = productGroupsOfCategory(cat);
+    groups.forEach(gr => {
+      if (gr.title){
+        const h = document.createElement("h4");
+        h.className = "admin-group-title";
+        h.textContent = gr.title;
+        block.appendChild(h);
+      }
+      gr.prods.forEach(p => block.appendChild(stockRowElement(p)));
     });
-    if (prods.length === 0){
+    if (groups.length === 0){
       block.innerHTML += `<p class="muted" style="font-size:.85rem;">Sin productos en esta categoría.</p>`;
     }
     wrap.appendChild(block);
@@ -4419,8 +4691,8 @@ function renderStockScreen(){
   wrap.querySelectorAll("[data-stock-clear]").forEach(b => b.addEventListener("click", () => {
     const p = state.products.find(p => p.id === b.dataset.stockClear);
     if (!p) return;
-    openConfirmModal("Vaciar stock", `¿Estás seguro de vaciar el stock de "${p.name}"? Su stock actual quedará en 0.`, () => {
-      p.stock = 0;
+    openConfirmModal("Vaciar stock", `¿Estás seguro de vaciar el stock de "${p.name}"? Su stock actual quedará en 0${stockGroupOf(p.id) ? " (y el de todo su grupo, porque comparten stock)" : ""}.`, () => {
+      setStockOf(p, 0);
       saveState();
       renderStockScreen();
     }, true, { cancel: "Cancelar", confirm: "Vaciar stock" });
@@ -4467,14 +4739,14 @@ function openStockMoveModal(productId, mode){
       return;
     }
     if (mode === "add"){
-      p.stock = (p.stock || 0) + qty;
+      changeStockOf(p, qty);
     } else {
       if (qty > (p.stock || 0)){
         errorEl.textContent = `No hay suficiente stock disponible (actual: ${p.stock}).`;
         errorEl.className = "import-feedback error";
         return;
       }
-    p.stock -= qty;
+    changeStockOf(p, -qty);
     }
     saveState();
     closeModal();
@@ -4483,29 +4755,478 @@ function openStockMoveModal(productId, mode){
   setTimeout(() => { document.getElementById("stockMoveQty").focus(); }, 50);
 }
 
+// ---------- COMBOS ----------
+const COMBO_CATEGORY_ID = "c_combos";
+function allCombos(){ return state.products.filter(p => p.combo).sort((a, b) => (a.order || 0) - (b.order || 0)); }
+function ensureComboCategory(){
+  if (!state.categories.some(c => c.id === COMBO_CATEGORY_ID)) state.categories.push({ id: COMBO_CATEGORY_ID, name: "Combos" });
+}
+// La categoría "Combos" solo existe mientras haya al menos un combo.
+function cleanupComboCategory(){
+  if (allCombos().length === 0 && !state.products.some(p => p.categoryId === COMBO_CATEGORY_ID)){
+    state.categories = state.categories.filter(c => c.id !== COMBO_CATEGORY_ID);
+  }
+}
+function round2c(n){ return Math.round((Number(n) || 0) * 100) / 100; }
+function comboRealValue(items){
+  return round2c(items.reduce((a, c) => { const cp = state.products.find(x => x.id === c.productId); return a + (cp ? cp.price * (c.qty || 1) : 0); }, 0));
+}
+
+document.getElementById("btnOpenCombos").addEventListener("click", () => switchView("combos"));
+document.getElementById("btnBackToProductsFromCombos").addEventListener("click", () => switchView("products"));
+document.getElementById("btnAddCombo").addEventListener("click", () => openComboForm(null));
+
+function renderCombosList(){
+  const wrap = document.getElementById("combosList");
+  wrap.innerHTML = "";
+  const combos = allCombos();
+  if (combos.length === 0){
+    wrap.innerHTML = `<p class="empty-msg">Todavía no hay combos. Toca "+ Añadir combo".</p>`;
+    return;
+  }
+  combos.forEach(p => {
+    const real = comboRealValue(p.combo.items);
+    const row = document.createElement("div");
+    row.className = "admin-prod-row" + (p.hidden ? " hidden-product" : "");
+    row.innerHTML = `
+      <div class="admin-prod-info">
+        <span class="admin-prod-name">${escapeHtml(p.name)}${p.hidden ? " (oculto)" : ""}</span>
+        <span class="admin-prod-meta">Valor combo: Bs ${p.price.toFixed(2)} · Valor real: Bs ${real.toFixed(2)}</span>
+        ${comboLinesHtml(p)}
+        ${state.stockEnabled ? `<span class="admin-prod-meta">${p.stockTracked ? "Stock del combo: " + p.stock + " · Stock mínimo: " + p.stockMin : "Sin control de stock"}</span>` : ""}
+      </div>
+      <div class="admin-prod-actions">
+        <button class="mini-btn" data-combo-edit="${escapeHtml(p.id)}">Editar</button>
+        <button class="mini-btn" data-combo-hide="${escapeHtml(p.id)}">${p.hidden ? "Mostrar" : "Ocultar"}</button>
+        <button class="mini-btn danger" data-combo-del="${escapeHtml(p.id)}">Eliminar</button>
+      </div>`;
+    wrap.appendChild(row);
+  });
+  wrap.querySelectorAll("[data-combo-edit]").forEach(b => b.addEventListener("click", () => openComboForm(b.dataset.comboEdit)));
+  wrap.querySelectorAll("[data-combo-hide]").forEach(b => b.addEventListener("click", () => {
+    const p = state.products.find(x => x.id === b.dataset.comboHide);
+    if (!p) return;
+    p.hidden = !p.hidden; saveState(); renderCombosList();
+  }));
+  wrap.querySelectorAll("[data-combo-del]").forEach(b => b.addEventListener("click", () => {
+    const p = state.products.find(x => x.id === b.dataset.comboDel);
+    if (!p) return;
+    openConfirmModal("Eliminar combo", `¿Eliminar el combo "${p.name}"? Las ventas ya hechas se conservan.`, () => {
+      state.products = state.products.filter(x => x.id !== p.id);
+      cleanupComboCategory();
+      saveState();
+      renderCombosList();
+    }, true, { confirm: "Eliminar" });
+  }));
+}
+
+let comboDraft = null;
+function openComboForm(id){
+  const existing = id ? state.products.find(p => p.id === id) : null;
+  if (existing){
+    comboDraft = {
+      id: existing.id, name: existing.name,
+      items: existing.combo.items.map(c => ({ productId: c.productId, qty: c.qty, ...(c.fixed ? { fixed: deepClone(c.fixed) } : {}) })),
+      percent: existing.combo.percent !== undefined && existing.combo.percent !== null ? String(existing.combo.percent) : "",
+      price: String(existing.price), manualPrice: true,
+      stockTracked: !!existing.stockTracked, stock: "", stockMin: String(existing.stockMin || 0)
+    };
+  } else {
+    comboDraft = { id: null, name: "", items: [], percent: "", price: "", manualPrice: false, stockTracked: !!state.stockEnabled, stock: "", stockMin: "0" };
+  }
+  switchViewRaw("comboform");
+  renderComboForm();
+}
+function renderComboForm(){
+  const d = comboDraft;
+  const wrap = document.getElementById("comboFormBody");
+  wrap.innerHTML = `
+    <label>Nombre del combo</label>
+    <input type="text" id="cfName" value="${escapeHtml(d.name)}" placeholder="Ej: Combo 1">
+    <label style="margin-top:14px;">Agregar productos</label>
+    <input type="search" id="cfSearch" placeholder="Buscar producto por nombre..." autocomplete="off">
+    <div id="cfResults" class="combo-results"></div>
+    <label style="margin-top:14px;">Productos del combo</label>
+    <div id="cfItems"></div>
+    <div class="pay-line highlight" style="margin-top:10px;"><span>Valor real</span><span id="cfReal">Bs 0.00</span></div>
+    <div class="debt-two-cols" style="margin-top:12px;">
+      <div><span class="muted" style="font-size:.78rem;">Descuento (%)</span><input type="number" id="cfPercent" min="0" max="100" step="any" inputmode="decimal" placeholder="0" value="${escapeHtml(d.percent)}"></div>
+      <div><span class="muted" style="font-size:.78rem;">Valor combo (Bs)</span><input type="number" id="cfPrice" min="0" step="any" inputmode="decimal" placeholder="0.00" value="${escapeHtml(d.price)}"></div>
+    </div>
+    <p class="muted" style="font-size:.8rem; margin-top:4px;">El porcentaje solo te da una idea: el valor combo se calcula solo, y puedes cambiarlo a mano.</p>
+    ${state.stockEnabled ? `
+      <label style="margin-top:14px;">Control de stock del combo</label>
+      <div class="toggle-pair" style="max-width:300px;">
+        <button type="button" id="cfStockOn" class="${d.stockTracked ? "selected" : ""}">Activado</button>
+        <button type="button" id="cfStockOff" class="${!d.stockTracked ? "selected" : ""}">Desactivado</button>
+      </div>
+      <div id="cfStockFields" class="debt-two-cols ${d.stockTracked ? "" : "hidden"}" style="margin-top:8px;">
+        ${d.id ? "" : `<div><span class="muted" style="font-size:.78rem;">Cuántos combos quieres vender</span><input type="number" id="cfStock" min="0" step="1" inputmode="numeric" placeholder="0" value="${escapeHtml(d.stock)}"></div>`}
+        <div><span class="muted" style="font-size:.78rem;">Stock mínimo</span><input type="number" id="cfStockMin" min="0" step="1" inputmode="numeric" value="${escapeHtml(d.stockMin)}"></div>
+      </div>
+      <p class="muted" style="font-size:.8rem; margin-top:4px;">Al vender un combo también se descuenta el stock de cada producto que contiene.</p>` : ""}
+    <p class="import-feedback" id="cfError"></p>
+    <div class="modal-actions" style="max-width:420px;">
+      <button class="modal-cancel" id="cfCancel">Cancelar</button>
+      <button class="modal-confirm" id="cfSave">Guardar combo</button>
+    </div>`;
+  const $ = (x) => document.getElementById(x);
+  const nameEl = $("cfName"), searchEl = $("cfSearch"), pctEl = $("cfPercent"), priceEl = $("cfPrice");
+  nameEl.addEventListener("input", () => { d.name = nameEl.value; });
+
+  // source: "price" (se escribió el valor combo), "percent" (se escribió el %) o "items" (cambió la lista).
+  function refreshTotals(source){
+    const real = comboRealValue(d.items);
+    $("cfReal").textContent = "Bs " + real.toFixed(2);
+    const setPriceFromPercent = () => {
+      const pc = Math.min(100, Math.max(0, parseFloat(d.percent) || 0));
+      d.price = String(round2c(real * (1 - pc / 100)));
+      priceEl.value = d.price;
+    };
+    const setPercentFromPrice = () => {
+      const v = parseFloat(d.price);
+      if (!isNaN(v) && real > 0 && v <= real){ d.percent = String(Math.round((1 - v / real) * 1000) / 10); pctEl.value = d.percent; }
+      else { d.percent = ""; pctEl.value = ""; }
+    };
+    if (source === "price"){ d.price = priceEl.value; d.manualPrice = true; setPercentFromPrice(); }
+    else if (source === "percent"){ d.percent = pctEl.value; d.manualPrice = false; if (d.percent !== "") setPriceFromPercent(); }
+    else {
+      if (!d.manualPrice && d.percent !== "") setPriceFromPercent();
+      else if (d.price !== "") setPercentFromPrice();
+    }
+  }
+  pctEl.addEventListener("input", () => refreshTotals("percent"));
+  priceEl.addEventListener("input", () => refreshTotals("price"));
+
+  function renderItems(){
+    const box = $("cfItems");
+    box.innerHTML = d.items.length ? "" : `<p class="muted" style="font-size:.85rem;">Aún no agregaste productos.</p>`;
+    d.items.forEach((c, idx) => {
+      const cp = state.products.find(x => x.id === c.productId);
+      const qs = comboQuestionsOf(c);
+      let cfgTxt = "";
+      if (qs.length){
+        cfgTxt = comboFixedComplete(c)
+          ? `<button type="button" class="mini-btn" data-cfg="${idx}">${escapeHtml(qs.map(q => c.fixed[q.id]).join(", "))} ✎</button>`
+          : `<button type="button" class="mini-btn" data-cfg="${idx}">El cliente elige al pagar ✎</button>`;
+      }
+      const row = document.createElement("div");
+      row.className = "combo-item-row";
+      row.innerHTML = `
+        <div class="combo-item-main"><strong>${escapeHtml(cp ? cp.name : "(eliminado)")}</strong>
+          <span class="muted" style="font-size:.8rem;"> Bs ${(cp ? cp.price : 0).toFixed(2)} c/u</span>${cfgTxt ? "<br>" + cfgTxt : ""}</div>
+        <div class="qty-control">
+          <button type="button" class="qty-btn" data-m="${idx}">−</button>
+          <input type="number" class="qty-input" data-q="${idx}" value="${c.qty}" min="1" step="1" inputmode="numeric">
+          <button type="button" class="qty-btn" data-p="${idx}">+</button>
+        </div>
+        <button type="button" class="cart-item-remove" data-x="${idx}" title="Quitar">✕</button>`;
+      box.appendChild(row);
+    });
+    const setQty = (idx, v) => { d.items[idx].qty = Math.max(1, Math.floor(v) || 1); renderItems(); refreshTotals("items"); };
+    box.querySelectorAll("[data-m]").forEach(b => b.addEventListener("click", () => setQty(+b.dataset.m, d.items[+b.dataset.m].qty - 1)));
+    box.querySelectorAll("[data-p]").forEach(b => b.addEventListener("click", () => setQty(+b.dataset.p, d.items[+b.dataset.p].qty + 1)));
+    box.querySelectorAll("[data-q]").forEach(i => i.addEventListener("change", () => setQty(+i.dataset.q, parseInt(i.value))));
+    box.querySelectorAll("[data-x]").forEach(b => b.addEventListener("click", () => { d.items.splice(+b.dataset.x, 1); renderItems(); renderResults(); refreshTotals("items"); }));
+    box.querySelectorAll("[data-cfg]").forEach(b => b.addEventListener("click", () => openComboItemConfig(+b.dataset.cfg, () => renderItems())));
+    $("cfReal").textContent = "Bs " + comboRealValue(d.items).toFixed(2);
+  }
+  function renderResults(){
+    const q = searchEl.value.trim().toLowerCase();
+    const box = $("cfResults");
+    if (!q){ box.innerHTML = ""; return; }
+    const list = state.products.filter(p => !p.combo && p.name.toLowerCase().includes(q)).sort((a, b) => a.name.localeCompare(b.name)).slice(0, 30);
+    box.innerHTML = list.length ? "" : `<p class="muted" style="font-size:.85rem;">No se encontró ese producto.</p>`;
+    list.forEach(p => {
+      const cat = state.categories.find(c => c.id === p.categoryId);
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "unit-btn"; b.style.marginBottom = "4px";
+      b.innerHTML = `<span class="unit-name">${escapeHtml(p.name)} <span class="muted" style="font-size:.78rem;">Bs ${p.price.toFixed(2)}${cat ? " · " + escapeHtml(cat.name) : ""}</span></span>`;
+      b.addEventListener("click", () => addComboComponent(p.id, () => { searchEl.value = ""; renderResults(); renderItems(); refreshTotals("items"); }));
+      box.appendChild(b);
+    });
+  }
+  function addComboComponent(pid, done){
+    const existingIdx = d.items.findIndex(c => c.productId === pid);
+    if (existingIdx >= 0){ d.items[existingIdx].qty += 1; done(); return; }
+    const prod = state.products.find(x => x.id === pid);
+    d.items.push({ productId: pid, qty: 1 });
+    if (prod && prod.advanced && prod.questions && prod.questions.length){
+      openComboItemConfig(d.items.length - 1, done, true);
+    } else done();
+  }
+  searchEl.addEventListener("input", renderResults);
+
+  if (state.stockEnabled){
+    $("cfStockOn").addEventListener("click", () => { d.stockTracked = true; $("cfStockOn").classList.add("selected"); $("cfStockOff").classList.remove("selected"); $("cfStockFields").classList.remove("hidden"); });
+    $("cfStockOff").addEventListener("click", () => { d.stockTracked = false; $("cfStockOff").classList.add("selected"); $("cfStockOn").classList.remove("selected"); $("cfStockFields").classList.add("hidden"); });
+    const st = $("cfStock"); if (st) st.addEventListener("input", () => { d.stock = st.value; });
+    $("cfStockMin").addEventListener("input", (e) => { d.stockMin = e.target.value; });
+  }
+  $("cfCancel").addEventListener("click", () => switchView("combos"));
+  $("cfSave").addEventListener("click", saveComboDraft);
+  renderItems();
+  refreshTotals("items");
+}
+
+// Pregunta cómo configurar un producto con opciones (sabor, etc.) dentro del combo:
+// elegir ahora (queda fijo en el combo) o saltar (el cliente elige al pagar).
+function openComboItemConfig(idx, done, isNew){
+  const c = comboDraft.items[idx];
+  const prod = state.products.find(x => x.id === c.productId);
+  if (!prod) { done(); return; }
+  const qs = prod.questions || [];
+  const sel = c.fixed ? deepClone(c.fixed) : {};
+  showModal(`
+    <h2>${escapeHtml(prod.name)} — falta configurar</h2>
+    <p class="muted" style="font-size:.85rem;">Elige las opciones que llevará siempre este combo, o toca "Saltar" para que el cliente las elija al pagar.${c.qty > 1 ? " La elección vale para todas las unidades de este producto en el combo." : ""}</p>
+    ${qs.map(q => `
+      <p style="font-weight:600; margin:14px 0 8px;">${escapeHtml(q.text)}</p>
+      <div class="option-group" data-question="${q.id}">
+        ${q.options.map(opt => `<button type="button" class="option-btn ${sel[q.id]===opt?'selected':''}" data-option="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`).join("")}
+      </div>`).join("")}
+    <p class="import-feedback" id="cicError"></p>
+    <div class="modal-actions">
+      <button class="modal-cancel" id="cicCancel">Cancelar</button>
+      <button class="modal-confirm" id="cicOk">Saltar</button>
+    </div>`);
+  const okBtn = document.getElementById("cicOk");
+  const refreshBtn = () => { okBtn.textContent = Object.keys(sel).length ? "Continuar" : "Saltar"; };
+  refreshBtn();
+  document.querySelectorAll(".option-group").forEach(group => {
+    const qid = group.dataset.question;
+    group.querySelectorAll(".option-btn").forEach(btn => btn.addEventListener("click", () => {
+      sel[qid] = btn.dataset.option;
+      group.querySelectorAll(".option-btn").forEach(b => b.classList.toggle("selected", b.dataset.option === sel[qid]));
+      refreshBtn();
+    }));
+  });
+  document.getElementById("cicCancel").addEventListener("click", () => {
+    closeModal();
+    if (isNew) comboDraft.items.splice(idx, 1);
+    done();
+  });
+  okBtn.addEventListener("click", () => {
+    const answered = Object.keys(sel).length;
+    if (answered && !qs.every(q => sel[q.id])){
+      const e = document.getElementById("cicError"); e.textContent = "Responde todas las opciones, o toca Cancelar y vuelve a elegir."; e.className = "import-feedback error"; return;
+    }
+    if (answered) c.fixed = sel; else delete c.fixed;
+    closeModal();
+    done();
+  });
+}
+
+function saveComboDraft(){
+  const d = comboDraft;
+  const errEl = document.getElementById("cfError");
+  const fail = (m) => { errEl.textContent = m; errEl.className = "import-feedback error"; };
+  const name = (d.name || "").trim();
+  if (!name) return fail("Escribe el nombre del combo.");
+  if (state.products.some(p => p.combo && p.id !== d.id && p.name.trim().toLowerCase() === name.toLowerCase())) return fail("Ya existe un combo con ese nombre.");
+  if (d.items.length === 0) return fail("Agrega al menos un producto al combo.");
+  const price = round2c(parseFloat(d.price));
+  if (!(price > 0)) return fail("El valor combo debe ser mayor a 0.");
+  const items = d.items.map(c => ({ productId: c.productId, qty: Math.max(1, Math.floor(c.qty) || 1), ...(c.fixed && Object.keys(c.fixed).length ? { fixed: deepClone(c.fixed) } : {}) }));
+  const cost = round2c(items.reduce((a, c) => { const cp = state.products.find(x => x.id === c.productId); return a + (cp ? (cp.cost || 0) * c.qty : 0); }, 0));
+  const percent = d.percent !== "" && !isNaN(parseFloat(d.percent)) ? Math.round(parseFloat(d.percent) * 10) / 10 : 0;
+  const combo = { items, percent };
+  if (d.id){
+    const p = state.products.find(x => x.id === d.id);
+    if (!p) return fail("Ese combo ya no existe.");
+    p.name = name; p.price = price; p.cost = cost; p.combo = combo;
+    p.stockTracked = state.stockEnabled ? !!d.stockTracked : p.stockTracked;
+    if (state.stockEnabled) p.stockMin = Math.max(0, parseInt(d.stockMin) || 0);
+  } else {
+    ensureComboCategory();
+    const order = state.products.filter(x => x.categoryId === COMBO_CATEGORY_ID).reduce((m, x) => Math.max(m, x.order || 0), -1) + 1;
+    state.products.push({
+      id: uid("p"), name, price, cost, categoryId: COMBO_CATEGORY_ID, subcategoryId: "", hidden: false, order,
+      stock: state.stockEnabled && d.stockTracked ? Math.max(0, parseInt(d.stock) || 0) : 0,
+      stockMin: state.stockEnabled ? Math.max(0, parseInt(d.stockMin) || 0) : 0,
+      stockTracked: state.stockEnabled ? !!d.stockTracked : false,
+      advanced: false, questions: [], kitchen: false, combo
+    });
+  }
+  saveState();
+  showToast("Combo guardado");
+  switchView("combos");
+}
+
+// ---------- AGRUPAR STOCK ----------
+function removeProductFromStockGroups(pid){
+  state.stockGroups = (state.stockGroups || [])
+    .map(g => Object.assign({}, g, { members: (g.members || []).filter(m => m.productId !== pid) }))
+    .filter(g => g.members.length >= 2);
+}
+function renderStockGroups(){
+  const wrap = document.getElementById("stockGroupsList");
+  wrap.innerHTML = "";
+  const groups = state.stockGroups || [];
+  if (groups.length === 0){
+    wrap.innerHTML = `<p class="empty-msg">Todavía no hay agrupaciones. Toca "+ Nueva agrupación" para juntar productos que gastan el mismo insumo (por ejemplo, las carnes de las hamburguesas).</p>`;
+    return;
+  }
+  groups.forEach(g => {
+    const prods = stockGroupProducts(g);
+    const pool = prods.length ? Math.min.apply(null, prods.map(p => p.stock || 0)) : 0;
+    const block = document.createElement("div");
+    block.className = "admin-cat";
+    block.innerHTML = `
+      <h3>${escapeHtml(g.name)}</h3>
+      ${g.members.map(m => {
+        const p = state.products.find(x => x.id === m.productId);
+        return `<div class="pay-line"><span>${p ? escapeHtml(p.name) : "(producto eliminado)"}</span><span>descuenta ${m.factor} por unidad</span></div>`;
+      }).join("")}
+      <div class="pay-line highlight"><span>Stock compartido</span><span>${pool}</span></div>
+      <div class="admin-prod-actions" style="margin-top:8px;">
+        <button class="mini-btn" data-sg-edit="${escapeHtml(g.id)}">Editar</button>
+        <button class="mini-btn danger" data-sg-del="${escapeHtml(g.id)}">Eliminar</button>
+      </div>`;
+    wrap.appendChild(block);
+  });
+  wrap.querySelectorAll("[data-sg-edit]").forEach(b => b.addEventListener("click", () => openStockGroupEditor(b.dataset.sgEdit)));
+  wrap.querySelectorAll("[data-sg-del]").forEach(b => b.addEventListener("click", () => {
+    const g = state.stockGroups.find(x => x.id === b.dataset.sgDel);
+    if (!g) return;
+    openConfirmModal("Eliminar agrupación", `¿Eliminar "${g.name}"? Los productos dejan de compartir stock; cada uno conserva el número que tiene ahora.`, () => {
+      state.stockGroups = state.stockGroups.filter(x => x.id !== g.id);
+      saveState();
+      renderStockGroups();
+    }, true, { confirm: "Eliminar" });
+  }));
+}
+document.getElementById("btnGoStockGroups").addEventListener("click", () => switchView("stockgroups"));
+document.getElementById("btnBackToStockFromGroups").addEventListener("click", () => switchView("stock"));
+document.getElementById("btnNewStockGroup").addEventListener("click", () => openStockGroupEditor(null));
+
+function openStockGroupEditor(gid){
+  const existing = gid ? state.stockGroups.find(g => g.id === gid) : null;
+  let n = 1;
+  while ((state.stockGroups || []).some(g => g.name === "Agrupación " + n)) n++;
+  const members = existing ? existing.members.filter(m => state.products.some(p => p.id === m.productId)).map(m => ({ productId: m.productId, factor: m.factor })) : [];
+  showModal(`
+    <h2>${existing ? "Editar agrupación" : "Nueva agrupación"}</h2>
+    <label>Nombre</label>
+    <input type="text" id="sgName" value="${escapeHtml(existing ? existing.name : "Agrupación " + n)}">
+    <label style="margin-top:10px;">Agregar productos</label>
+    <input type="search" id="sgSearch" placeholder="Buscar producto..." autocomplete="off">
+    <div id="sgResults" style="max-height:170px; overflow:auto; margin-top:6px;"></div>
+    <label style="margin-top:12px;">Productos de la agrupación — cuánto descuenta cada unidad vendida</label>
+    <div id="sgSelected"></div>
+    <p class="import-feedback" id="sgError"></p>
+    <div class="modal-actions">
+      <button class="modal-cancel" id="sgCancel">Cancelar</button>
+      <button class="modal-confirm" id="sgSave">Guardar</button>
+    </div>
+  `);
+  const resEl = document.getElementById("sgResults"), selEl = document.getElementById("sgSelected"), searchEl = document.getElementById("sgSearch"), errEl = document.getElementById("sgError");
+  const catName = (p) => { const c = state.categories.find(x => x.id === p.categoryId); return c ? c.name : ""; };
+  function renderResults(){
+    const q = searchEl.value.trim().toLowerCase();
+    const list = state.products.filter(p => p.stockTracked && !p.combo
+      && !members.some(m => m.productId === p.id)
+      && (!stockGroupOf(p.id) || (existing && stockGroupOf(p.id).id === existing.id))
+      && (!q || p.name.toLowerCase().includes(q)))
+      .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 40);
+    resEl.innerHTML = list.length ? "" : `<p class="muted" style="font-size:.85rem;">${state.stockEnabled ? "No hay productos para agregar (solo salen los que tienen el stock activado y no están en otra agrupación)." : "Activa primero el sistema de stock."}</p>`;
+    list.forEach(p => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "unit-btn"; b.style.marginBottom = "4px";
+      b.innerHTML = `<span class="unit-name">${escapeHtml(p.name)} <span class="muted" style="font-size:.78rem;">${escapeHtml(catName(p))}</span></span>`;
+      b.addEventListener("click", () => { members.push({ productId: p.id, factor: 1 }); renderResults(); renderSelected(); });
+      resEl.appendChild(b);
+    });
+  }
+  function renderSelected(){
+    selEl.innerHTML = members.length ? "" : `<p class="muted" style="font-size:.85rem;">Aún no agregaste productos.</p>`;
+    members.forEach((m, idx) => {
+      const p = state.products.find(x => x.id === m.productId);
+      const row = document.createElement("div");
+      row.className = "pay-line";
+      row.innerHTML = `<span style="flex:1;">${escapeHtml(p ? p.name : "?")}</span>
+        <input type="number" min="1" step="1" inputmode="numeric" value="${m.factor}" style="width:70px; margin:0 8px;">
+        <button type="button" class="cart-item-remove" title="Quitar">✕</button>`;
+      row.querySelector("input").addEventListener("input", (e) => { m.factor = e.target.value; });
+      row.querySelector("button").addEventListener("click", () => { members.splice(idx, 1); renderResults(); renderSelected(); });
+      selEl.appendChild(row);
+    });
+  }
+  searchEl.addEventListener("input", renderResults);
+  renderResults(); renderSelected();
+  document.getElementById("sgCancel").addEventListener("click", closeModal);
+  document.getElementById("sgSave").addEventListener("click", () => {
+    const name = document.getElementById("sgName").value.trim() || ("Agrupación " + n);
+    if (members.length < 2){ errEl.textContent = "Elige al menos 2 productos."; errEl.className = "import-feedback error"; return; }
+    for (const m of members){
+      const f = Number(m.factor);
+      if (!Number.isInteger(f) || f < 1){ errEl.textContent = "Cada número debe ser un entero de 1 o más."; errEl.className = "import-feedback error"; return; }
+      m.factor = f;
+    }
+    if (existing){
+      existing.name = name;
+      existing.members = members.map(m => ({ productId: m.productId, factor: m.factor }));
+    } else {
+      state.stockGroups.push({ id: uid("sg"), name, members: members.map(m => ({ productId: m.productId, factor: m.factor })) });
+    }
+    const g = existing || state.stockGroups[state.stockGroups.length - 1];
+    const adjusted = normalizeStockGroup(g);
+    saveState();
+    closeModal();
+    renderStockGroups();
+    if (adjusted) showToast("Los productos tenían distinto stock: todos quedaron en el menor.");
+  });
+}
+
 function renderStockLowScreen(){
   const wrap = document.getElementById("stockLowList");
   wrap.innerHTML = "";
-  const lowProducts = state.products.filter(p => p.stockTracked && p.stock <= p.stockMin);
-  if (lowProducts.length === 0){
+  const isLow = (p) => p.stockTracked && p.stock <= p.stockMin;
+  if (!state.products.some(isLow)){
     wrap.innerHTML = `<p class="empty-msg">No hay productos con stock bajo.</p>`;
     return;
   }
-  lowProducts.forEach(p => {
-    const cat = state.categories.find(c => c.id === p.categoryId);
+  const lowRow = (p) => {
     const row = document.createElement("div");
     row.className = "admin-prod-row";
     row.innerHTML = `
       <div class="admin-prod-info">
         <span class="admin-prod-name">${p.name} <span class="tag danger">STOCK BAJO</span></span>
-        <span class="admin-prod-meta">${cat ? cat.name + " · " : ""}${subcategoryName(p) ? subcategoryName(p) + " · " : ""}Stock actual: ${p.stock} · Stock mínimo: ${p.stockMin}</span>
+        <span class="admin-prod-meta">Stock actual: ${p.stock} · Stock mínimo: ${p.stockMin}</span>
       </div>
       <div class="admin-prod-actions">
         <button class="mini-btn" data-stock-add="${p.id}">Añadir</button>
       </div>
     `;
-    wrap.appendChild(row);
+    return row;
+  };
+  const shown = new Set();
+  state.categories.forEach(cat => {
+    const groups = productGroupsOfCategory(cat).map(g => ({ title: g.title, prods: g.prods.filter(isLow) })).filter(g => g.prods.length);
+    if (!groups.length) return;
+    const block = document.createElement("div");
+    block.className = "admin-cat";
+    block.innerHTML = `<h3>${cat.name}</h3>`;
+    groups.forEach(gr => {
+      if (gr.title){
+        const h = document.createElement("h4");
+        h.className = "admin-group-title";
+        h.textContent = gr.title;
+        block.appendChild(h);
+      }
+      gr.prods.forEach(p => { shown.add(p.id); block.appendChild(lowRow(p)); });
+    });
+    wrap.appendChild(block);
   });
+  // Productos con categoría desconocida (por si acaso): al final.
+  const rest = state.products.filter(p => isLow(p) && !shown.has(p.id));
+  if (rest.length){
+    const block = document.createElement("div");
+    block.className = "admin-cat";
+    block.innerHTML = `<h3>Otros</h3>`;
+    rest.forEach(p => block.appendChild(lowRow(p)));
+    wrap.appendChild(block);
+  }
   wrap.querySelectorAll("[data-stock-add]").forEach(b => b.addEventListener("click", () => openStockMoveModalFromLow(b.dataset.stockAdd)));
 }
 function openStockMoveModalFromLow(productId){
@@ -4532,7 +5253,7 @@ function openStockMoveModalFromLow(productId){
       errorEl.className = "import-feedback error";
       return;
     }
-    p.stock = (p.stock || 0) + qty;
+    changeStockOf(p, qty);
     saveState();
     closeModal();
     renderStockLowScreen();
@@ -4558,7 +5279,8 @@ document.getElementById("btnImportExport").addEventListener("click", () => {
 });
 
 function exportProductsXlsx(){
-  const rows = state.products.map(p => {
+  // Los combos se arman en su propia pantalla (no van en el Excel de productos).
+  const rows = state.products.filter(p => !p.combo).map(p => {
     const cat = state.categories.find(c => c.id === p.categoryId);
     const row = {
       "Categoría": cat ? cat.name : "",
@@ -4754,6 +5476,8 @@ function applyImport(parsedRows){
     const sub = r.subName ? findOrCreateSubcategory(cat.id, r.subName) : null;
     findOrCreateProduct(r.prodName, cat.id, sub ? sub.id : (r.subName === null ? undefined : ""), r.price, r.cost, r.hidden, r.stock, r.stockMin, r.stockTracked, r.advanced, r.questions, r.kitchen);
   });
+  // Los productos agrupados comparten stock: si el Excel los dejó distintos, todos quedan en el menor.
+  normalizeAllStockGroups();
   saveState();
 }
 
@@ -4913,6 +5637,48 @@ function forceFullResync(){
   pushStateToFirebase();
   closeModal();
   alert("Resincronización enviada. En unos segundos, los demás dispositivos deberían ponerse al día automáticamente.");
+}
+
+// ---------- RESPALDO DE DATOS (archivo) ----------
+// Descargar: guarda todo lo que este dispositivo tiene en un archivo .json.
+// Cargar (solo en la versión de respaldo sin nube): reemplaza los datos de ESTE
+// dispositivo por los del archivo. En la versión con Firebase no existe, para
+// no pisar los datos compartidos de todos.
+function downloadBackupFile(){
+  const payload = { posShalomBackup: 1, exportedAt: new Date().toISOString(), state: deepClone(state) };
+  const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+  const a = document.createElement("a");
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  a.href = URL.createObjectURL(blob);
+  a.download = `respaldo-pos-shalom-${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}.json`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  showToast("Respaldo descargado");
+}
+function loadBackupFile(file){
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try { data = JSON.parse(reader.result); } catch (e){ alert("Ese archivo no es un respaldo válido."); return; }
+    const st = data && data.posShalomBackup ? data.state : null;
+    if (!st || !Array.isArray(st.products) || !Array.isArray(st.categories)){ alert("Ese archivo no es un respaldo del POS Shalom."); return; }
+    openConfirmModal("Cargar respaldo",
+      `Se reemplazarán TODOS los datos de este dispositivo por los del respaldo (${st.products.length} productos, ${(st.sales || []).length} ventas de la jornada). ¿Continuar?`,
+      () => {
+        try {
+          localStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify({ state: st, lastSyncSnapshot: { products: {}, sales: {}, pendingSales: {}, cashMovements: {}, cashClosures: {}, debtors: {}, debtPayments: {}, meta: null } }));
+        } catch (e){ alert("No se pudo guardar el respaldo en este dispositivo (almacenamiento lleno)."); return; }
+        location.reload();
+      }, true, { confirm: "Sí, cargar respaldo" });
+  };
+  reader.readAsText(file);
+}
+document.getElementById("btnDownloadBackup").addEventListener("click", downloadBackupFile);
+if (OFFLINE_MODE){
+  document.getElementById("backupLoadBlock").classList.remove("hidden");
+  document.getElementById("backupFileInput").addEventListener("change", (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) loadBackupFile(f); });
 }
 
 // Cambio de una contraseña numérica (eliminaciones / deudas).
@@ -5562,6 +6328,7 @@ async function startApp(){
   } else {
     appStarted = true;
     setFbStatus("error");
+    if (OFFLINE_MODE) setTimeout(() => { try { registerThisDevice(); } catch (e){} }, 1500);
   }
 }
 startApp();

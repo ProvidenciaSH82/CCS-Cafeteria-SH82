@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-title" id="appTitleMeta" content="POS Shalom">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=202610162330">
+<link rel="stylesheet" href="style.css?v=202610292240">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
@@ -172,6 +172,7 @@
             <button class="btn-primary" id="btnImportExport">Importar / Exportar</button>
             <button class="btn-primary" id="btnAddCategory">Categoría</button>
             <button class="btn-primary" id="btnAddSubcategory">Subcategoría</button>
+            <button class="btn-primary" id="btnOpenCombos">Combos</button>
             <button class="btn-primary hidden" id="btnGoStock">Stock</button>
             <button class="btn-primary" id="btnAddProduct">+ Producto</button>
           </div>
@@ -241,9 +242,38 @@
         </header>
         <div class="header-actions" style="margin-bottom:16px;">
           <button class="btn-primary" id="btnGoStockLow">Ver stock bajo</button>
+          <button class="btn-primary" id="btnGoStockGroups">Agrupar stock</button>
           <button class="btn-ghost danger" id="btnClearAllStock" style="margin-left:auto;">Vaciar todo el stock</button>
         </div>
         <div id="stockList"></div>
+      </section>
+
+      <!-- ---------- COMBOS ---------- -->
+      <section class="view" id="view-combos">
+        <header class="view-header row">
+          <button class="btn-back" id="btnBackToProductsFromCombos">← Volver a productos</button>
+          <h1>Combos</h1>
+          <div class="header-actions"><button class="btn-primary" id="btnAddCombo">+ Añadir combo</button></div>
+        </header>
+        <div id="combosList"></div>
+      </section>
+
+      <section class="view" id="view-comboform">
+        <header class="view-header"><h1>Combo</h1></header>
+        <div id="comboFormBody" style="max-width:560px;"></div>
+      </section>
+
+      <!-- ---------- AGRUPAR STOCK ---------- -->
+      <section class="view" id="view-stockgroups">
+        <header class="view-header row">
+          <button class="btn-back" id="btnBackToStockFromGroups">← Volver a stock</button>
+          <h1>Agrupar stock</h1>
+        </header>
+        <p class="muted" style="margin-bottom:12px; max-width:640px;">Junta productos que gastan el mismo insumo. Todos comparten el mismo stock, y cada uno descuenta la cantidad que indiques (por ejemplo, la hamburguesa doble descuenta 2 carnes).</p>
+        <div class="header-actions" style="margin-bottom:16px;">
+          <button class="btn-primary" id="btnNewStockGroup">+ Nueva agrupación</button>
+        </div>
+        <div id="stockGroupsList"></div>
       </section>
 
       <!-- ---------- STOCK BAJO ---------- -->
@@ -371,6 +401,15 @@
           <button class="btn-primary" id="btnConfigDebtPassword" style="width:fit-content;">Configurar</button>
         </div>
         <div class="settings-block" style="max-width:620px; margin-top:16px;">
+          <label>Respaldo de datos</label>
+          <p class="muted" style="font-size:.85rem; margin-bottom:8px;">Descarga un archivo con todos los datos que este dispositivo tiene ahora (productos, ventas de la jornada, cierres, deudas, configuración). No incluye el historial antiguo ya archivado en la nube.</p>
+          <button class="btn-primary" id="btnDownloadBackup" style="width:fit-content;">Descargar respaldo</button>
+          <div id="backupLoadBlock" class="hidden" style="margin-top:14px;">
+            <label>Cargar un respaldo (reemplaza los datos de este dispositivo)</label>
+            <input type="file" id="backupFileInput" accept=".json,application/json">
+          </div>
+        </div>
+        <div class="settings-block" style="max-width:620px; margin-top:16px;">
           <label>Forzar resincronización completa</label>
           <p class="muted" style="font-size:.85rem; margin-bottom:8px;">
             Úsalo SOLO desde el dispositivo que tenga la información más completa y correcta
@@ -462,6 +501,6 @@
 
   <div class="toast" id="posToast"></div>
 
-  <script src="app.js?v=202610162330"></script>
+  <script src="app.js?v=202610292240"></script>
 </body>
 </html>
