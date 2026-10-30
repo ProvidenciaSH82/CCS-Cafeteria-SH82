@@ -1537,7 +1537,7 @@ function renderMovementsList(){
     row.className = "history-row";
     row.innerHTML = `
       <span class="tag ${m.type==='salida'?'danger':''}" style="${m.type==='salida'?'background:var(--danger); color:#fff;':''}">${m.type === "entrada" ? "Entrada" : "Salida"}</span>
-      <span class="hmeta">${m.description} · <strong>${m.account === "efectivo" ? "Efectivo" : "QR"}</strong> · Bs ${m.amount.toFixed(2)} · ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>
+      <span class="hmeta">${escapeHtml(m.description)} · <strong>${m.account === "efectivo" ? "Efectivo" : "QR"}</strong> · Bs ${m.amount.toFixed(2)} · ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>
       <div class="hactions">
         <button class="mini-btn" data-edit-mov="${m.id}">Editar</button>
         <button class="mini-btn danger" data-delete-mov="${m.id}">Eliminar</button>
@@ -1568,7 +1568,7 @@ function openMovementModal(existingId){
       <button type="button" id="movSalida" class="${type==='salida'?'selected':''}">Salida</button>
     </div>
     <label>Descripción</label>
-    <input type="text" id="movDesc" value="${editing ? editing.description : ""}" placeholder="Ej: Compra de 1/4 kg de queso">
+    <input type="text" id="movDesc" value="${editing ? escapeHtml(editing.description) : ""}" placeholder="Ej: Compra de 1/4 kg de queso">
     <label>Cuenta</label>
     <div class="toggle-pair">
       <button type="button" id="movEfectivo" class="${account==='efectivo'?'selected':''}">Efectivo</button>
@@ -1854,10 +1854,10 @@ function showClosureSummary(closure, isHistoryView){
   const efectivoCaja = closure.initialAmount + closure.totals.cash + ms.entradasEfectivo - ms.salidasEfectivo + (dbt.collectedCash || 0);
   const qrAjustado = closure.totals.qr + ms.entradasQr - ms.salidasQr + (dbt.collectedQr || 0);
   const productsHtml = closure.productDetail.map(p => `
-    <div class="pay-line"><span>${p.name}</span><span>${p.qty} unid.</span></div>
+    <div class="pay-line"><span>${escapeHtml(p.name)}</span><span>${p.qty} unid.</span></div>
   `).join("") || `<p class="muted" style="font-size:.85rem;">No se vendieron productos.</p>`;
   const movementsHtml = (closure.movements || []).length
-    ? closure.movements.map(m => `<div class="pay-line"><span>${m.type==="entrada"?"Entrada":"Salida"} — ${m.description} (${m.account==="efectivo"?"Efectivo":"QR"})</span><span>Bs ${m.amount.toFixed(2)}</span></div>`).join("")
+    ? closure.movements.map(m => `<div class="pay-line"><span>${m.type==="entrada"?"Entrada":"Salida"} — ${escapeHtml(m.description)} (${m.account==="efectivo"?"Efectivo":"QR"})</span><span>Bs ${m.amount.toFixed(2)}</span></div>`).join("")
     : `<p class="muted" style="font-size:.85rem;">No hubo entradas ni salidas registradas.</p>`;
 
   showModal(`
@@ -2309,6 +2309,17 @@ function checkStockDemand(demand){
 function applyStockDemand(demand, sign){
   stockNeedsOf(demand).forEach(e => { changeStockOf(e.prod, sign * e.need); });
 }
+// Valida el stock de una lista de líneas del carrito. Si se está EDITANDO una
+// venta, lo que esa venta ya tenía reservado cuenta como disponible (si no, al
+// editar una venta que dejó el stock en 0 no se podría ni reducir la cantidad).
+function checkCartLines(lines){
+  const sale = (editingSaleId && state.stockEnabled) ? state.sales.find(x => x.id === editingSaleId) : null;
+  if (!sale) return checkStockDemand(demandOfItems(lines));
+  const orig = demandOfItems(sale.items);
+  applyStockDemand(orig, +1);
+  try { return checkStockDemand(demandOfItems(lines)); }
+  finally { applyStockDemand(orig, -1); }
+}
 function cartLinesForStock(){
   return state.cart.map(i => ({ productId: i.productId, qty: i.qty, comboItems: i.comboItems }));
 }
@@ -2434,7 +2445,7 @@ function renderProductGrid(catId, subId){
     const btn = document.createElement("button");
     btn.className = "pick-card";
     btn.innerHTML = `
-      <span class="name">${p.name}</span>
+      <span class="name">${escapeHtml(p.name)}</span>
       <span class="price">Bs ${p.price.toFixed(2)}</span>
       ${p.combo ? comboLinesHtml(p) : ""}
       ${lowStock ? `<span class="stock-warning">⚠ Stock: ${p.stock}</span>` : ""}
@@ -2467,7 +2478,7 @@ function addToCart(productId){
   const lines = cartLinesForStock();
   if (existing) lines.find(l => l.productId === productId).qty += 1;
   else lines.push({ productId, qty: 1, comboItems: comboItemsOfLine({ productId }) || undefined });
-  const chk = checkStockDemand(demandOfItems(lines));
+  const chk = checkCartLines(lines);
   if (!chk.ok){
     alert(`No hay suficiente stock de "${chk.name}". Disponible: ${chk.available}.`);
     return;
@@ -2515,7 +2526,7 @@ function renderCart(){
     row.className = "cart-item";
     row.innerHTML = `
       <div class="cart-item-top">
-        <span class="cart-item-name">${item.name}</span>
+        <span class="cart-item-name">${escapeHtml(item.name)}</span>
         <button class="cart-item-remove" data-remove="${item.productId}">✕</button>
       </div>
       <div class="cart-item-row">
@@ -2573,12 +2584,15 @@ function setItemQty(productId, newQty){
   const prod = state.products.find(p => p.id === productId);
   const lines = cartLinesForStock();
   lines.find(l => l.productId === productId).qty = newQty;
-  const chk = checkStockDemand(demandOfItems(lines));
+  const chk = checkCartLines(lines);
   if (!chk.ok){
     alert(`No hay suficiente stock de "${chk.name}". Disponible: ${chk.available}.`);
     return false;
   }
   item.qty = newQty;
+  if (item.comboSel){
+    Object.keys(item.comboSel).forEach(k => { if (parseInt(k.split(":")[0], 10) >= newQty) delete item.comboSel[k]; });
+  }
   if (prod && prod.advanced){
     if (!item.unitSelections) item.unitSelections = [];
     while (item.unitSelections.length < newQty) item.unitSelections.push(null);
@@ -2655,7 +2669,7 @@ document.getElementById("btnPendingSales").addEventListener("click", () => {
   }
   const rows = state.pendingSales.map(p => {
     const total = p.items.reduce((a,i) => a + itemFinalPrice(i) * i.qty, 0);
-    const summary = p.items.map(i => `${i.qty} ${i.name}`).join(", ");
+    const summary = p.items.map(i => `${i.qty} ${escapeHtml(i.name)}`).join(", ");
     return `
       <div class="held-sale-card">
         <div class="held-sale-summary">${summary}</div>
@@ -2699,7 +2713,7 @@ function openDiscountModal(productId){
   let value = item.discountValue || 0;
 
   showModal(`
-    <h2>Aplicar descuento — ${item.name}</h2>
+    <h2>Aplicar descuento — ${escapeHtml(item.name)}</h2>
     <div class="toggle-pair">
       <button id="dtPercent" class="${type==='percent'?'selected':''}">Porcentaje</button>
       <button id="dtFinal" class="${type==='final'?'selected':''}">Precio final</button>
@@ -2740,7 +2754,8 @@ function openDiscountModal(productId){
 function getCartTotal(){
   const subtotal = state.cart.reduce((a,i) => a + i.price*i.qty, 0);
   const discount = state.cart.reduce((a,i) => a + itemDiscountAmount(i), 0);
-  return subtotal - discount;
+  // Redondeado a centavos para que no queden restos como 22.500000001 en la caja.
+  return Math.round((subtotal - discount) * 100) / 100;
 }
 
 document.querySelectorAll(".pay-btn").forEach(btn => {
@@ -2833,7 +2848,7 @@ function openAdvancedSelectionsModal(){
       rows.push({
         productId: item.productId,
         unitIndex: u,
-        label: item.qty > 1 ? `${item.name} ${u+1}` : item.name,
+        label: item.qty > 1 ? `${escapeHtml(item.name)} ${u+1}` : escapeHtml(item.name),
         complete
       });
     }
@@ -2847,7 +2862,7 @@ function openAdvancedSelectionsModal(){
       const complete = !!sel && qs.every(q => sel[q.id]);
       const unitTxt = item.qty > 1 ? ` ${sl.u + 1}` : "";
       const partTxt = (sl.comp.qty || 1) > 1 ? ` ${sl.k + 1}` : "";
-      rows.push({ productId: item.productId, comboKey: sl.key, label: `${item.name}${unitTxt} — ${cp ? cp.name : "?"}${partTxt}`, complete });
+      rows.push({ productId: item.productId, comboKey: sl.key, label: `${escapeHtml(item.name)}${unitTxt} — ${cp ? escapeHtml(cp.name) : "?"}${partTxt}`, complete });
     });
   });
 
@@ -2896,11 +2911,11 @@ function openComboPartConfigModal(productId, key){
   if (!item.comboSel) item.comboSel = {};
   if (!item.comboSel[key]) item.comboSel[key] = {};
   const sel = item.comboSel[key];
-  const label = `${item.name}${item.qty > 1 ? " " + (sl.u + 1) : ""} — ${cp ? cp.name : ""}${(sl.comp.qty || 1) > 1 ? " " + (sl.k + 1) : ""}`;
+  const label = `${escapeHtml(item.name)}${item.qty > 1 ? " " + (sl.u + 1) : ""} — ${cp ? escapeHtml(cp.name) : ""}${(sl.comp.qty || 1) > 1 ? " " + (sl.k + 1) : ""}`;
   const questionsHtml = qs.map(q => `
-    <p style="font-weight:600; margin:14px 0 8px;">${q.text}</p>
+    <p style="font-weight:600; margin:14px 0 8px;">${escapeHtml(q.text)}</p>
     <div class="option-group" data-question="${q.id}">
-      ${q.options.map(opt => `<button type="button" class="option-btn ${sel[q.id]===opt?'selected':''}" data-option="${opt}">${opt}</button>`).join("")}
+      ${q.options.map(opt => `<button type="button" class="option-btn ${sel[q.id]===opt?'selected':''}" data-option="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`).join("")}
     </div>
   `).join("");
   showModal(`
@@ -2931,12 +2946,12 @@ function openUnitConfigModal(productId, unitIndex){
   if (!item || !prod) return;
   if (!item.unitSelections[unitIndex]) item.unitSelections[unitIndex] = {};
   const sel = item.unitSelections[unitIndex];
-  const label = item.qty > 1 ? `${item.name} ${unitIndex+1}` : item.name;
+  const label = item.qty > 1 ? `${escapeHtml(item.name)} ${unitIndex+1}` : escapeHtml(item.name);
 
   const questionsHtml = prod.questions.map(q => `
-    <p style="font-weight:600; margin:14px 0 8px;">${q.text}</p>
+    <p style="font-weight:600; margin:14px 0 8px;">${escapeHtml(q.text)}</p>
     <div class="option-group" data-question="${q.id}">
-      ${q.options.map(opt => `<button type="button" class="option-btn ${sel[q.id]===opt?'selected':''}" data-option="${opt}">${opt}</button>`).join("")}
+      ${q.options.map(opt => `<button type="button" class="option-btn ${sel[q.id]===opt?'selected':''}" data-option="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`).join("")}
     </div>
   `).join("");
 
@@ -3129,8 +3144,8 @@ async function finalizeSale(name, method, cash, qr, debt){
 }
 async function finalizeSaleInner(name, method, cash, qr, debt){
   const total = getCartTotal();
-  const subtotal = state.cart.reduce((a,i) => a + i.price*i.qty, 0);
-  const discount = subtotal - total;
+  const subtotal = Math.round(state.cart.reduce((a,i) => a + i.price*i.qty, 0) * 100) / 100;
+  const discount = Math.round((subtotal - total) * 100) / 100;
 
   const itemsSnapshot = state.cart.map(i => {
     const prod = state.products.find(p => p.id === i.productId);
@@ -3576,7 +3591,7 @@ function deleteDebtor(id){
     alert(`No se puede eliminar a "${d.name}": tiene una deuda pendiente de Bs ${balance.toFixed(2)}.`);
     return;
   }
-  openConfirmModal("Eliminar deudor", `¿Seguro que quieres eliminar a "${d.name}"? Su historial de compras pagadas dejará de mostrarse aquí.`, () => {
+  openConfirmModal("Eliminar deudor", `¿Seguro que quieres eliminar a "${escapeHtml(d.name)}"? Su historial de compras pagadas dejará de mostrarse aquí.`, () => {
     state.debtors = state.debtors.filter(x => x.id !== id);
     saveState(); renderDebtors();
   }, true, {}, true);
@@ -3756,7 +3771,7 @@ function renderHistory(){
     row.innerHTML = `
       <span class="hnum">#${String(sale.jornadaNumber).padStart(3,'0')}</span>
       <span class="hmeta">
-        ${sale.deleted ? `<span class="tag voided-tag">ANULADA</span> ` : ""}${sale.name ? `<strong>${sale.name}</strong> · ` : ""}${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · <span class="tag">${sale.debt ? "deuda · pagó Bs " + ((sale.cash||0)+(sale.qr||0)).toFixed(2) : sale.method}</span>${sellerLabel(sale)}
+        ${sale.deleted ? `<span class="tag voided-tag">ANULADA</span> ` : ""}${sale.name ? `<strong>${escapeHtml(sale.name)}</strong> · ` : ""}${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · <span class="tag">${sale.debt ? "deuda · pagó Bs " + ((sale.cash||0)+(sale.qr||0)).toFixed(2) : sale.method}</span>${sellerLabel(sale)}
       </span>
       <span class="htotal">Bs ${sale.total.toFixed(2)}</span>
       <div class="hactions">
@@ -3778,7 +3793,7 @@ function viewSale(saleId){
   const itemsHtml = sale.items.map(i => {
     const answersHtml = (i.unitAnswers || []).map((ans, idx) => {
       if (!ans || ans.length === 0) return "";
-      const label = i.qty > 1 ? `${i.name} ${idx+1}` : i.name;
+      const label = i.qty > 1 ? `${escapeHtml(i.name)} ${idx+1}` : escapeHtml(i.name);
       const lines = ans.map(a => `<div class="muted" style="font-size:.8rem;">${a.question} - ${a.answer}</div>`).join("");
       return `<div style="margin:4px 0 6px 10px;"><strong style="font-size:.85rem;">${label}</strong>${lines}</div>`;
     }).join("");
@@ -3787,14 +3802,14 @@ function viewSale(saleId){
       return `<div class="muted" style="font-size:.8rem; margin-left:10px;">• ${escapeHtml(pt.name)}${ans ? " — " + escapeHtml(ans) : ""}</div>`;
     }).join("");
     return `
-      <div class="pay-line"><span>${i.name} x${i.qty}</span><span>Bs ${(i.finalPrice*i.qty).toFixed(2)}</span></div>
+      <div class="pay-line"><span>${escapeHtml(i.name)} x${i.qty}</span><span>Bs ${(i.finalPrice*i.qty).toFixed(2)}</span></div>
       ${partsHtml}
       ${answersHtml}
     `;
   }).join("");
   showModal(`
     <h2>Venta #${String(sale.jornadaNumber).padStart(3,'0')}${sale.deleted ? ' <span class="tag voided-tag">ANULADA</span>' : ''}</h2>
-    ${sale.name ? `<p style="font-weight:700; margin-bottom:4px;">${sale.name}</p>` : ""}
+    ${sale.name ? `<p style="font-weight:700; margin-bottom:4px;">${escapeHtml(sale.name)}</p>` : ""}
     <p class="muted" style="margin-bottom:10px;">${d.toLocaleDateString()} — ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}${sellerLabel(sale)}</p>
     ${itemsHtml}
     <div class="cart-summary" style="margin-top:10px;">
@@ -3949,7 +3964,7 @@ function renderAdminProductRows(wrap, prods){
     row.className = "admin-prod-row" + (p.hidden ? " hidden-product" : "");
     row.innerHTML = `
       <div class="admin-prod-info">
-        <span class="admin-prod-name">${p.name}${p.hidden ? " (oculto)" : ""}${p.combo ? ' <span class="tag">Combo</span>' : ""}</span>
+        <span class="admin-prod-name">${escapeHtml(p.name)}${p.hidden ? " (oculto)" : ""}${p.combo ? ' <span class="tag">Combo</span>' : ""}</span>
         <span class="admin-prod-meta">Precio: Bs ${p.price.toFixed(2)} · Costo: Bs ${(p.cost||0).toFixed(2)}</span>
         ${p.combo ? comboLinesHtml(p) : ""}
         ${state.stockEnabled ? `<span class="admin-prod-meta">${p.stockTracked ? "Stock: " + p.stock + " · Stock mínimo: " + p.stockMin : "Sin control de stock"}</span>` : ""}
@@ -3979,6 +3994,7 @@ function bindAdminProductActions(wrap, catId){
     openConfirmModal("Eliminar producto", "¿Seguro que quieres eliminar este producto?", () => {
       state.products = state.products.filter(p => p.id !== b.dataset.deleteProd);
       removeProductFromStockGroups(b.dataset.deleteProd);
+      removeProductFromCombos(b.dataset.deleteProd);
       cleanupComboCategory();
       saveState(); renderProductAdminList(catId);
     }, true, {}, true);
@@ -4084,13 +4100,13 @@ function renderProductFormModal(){
   if (d.subcategoryId && !subsOfCat.some(sc => sc.id === d.subcategoryId)) d.subcategoryId = "";
   const subOptions = `<option value="">Sin subcategoría</option>` + subsOfCat.map(sc => `<option value="${sc.id}" ${sc.id===d.subcategoryId?"selected":""}>${escapeHtml(sc.name)}</option>`).join("");
   const questionsHtml = d.questions.length
-    ? d.questions.map((q, idx) => `<div class="question-row" data-question-idx="${idx}">${idx+1}. ${q.text}</div>`).join("")
+    ? d.questions.map((q, idx) => `<div class="question-row" data-question-idx="${idx}">${idx+1}. ${escapeHtml(q.text)}</div>`).join("")
     : `<p class="muted" style="font-size:.85rem;">Todavía no hay preguntas configuradas.</p>`;
 
   showModal(`
     <h2>${d.mode === "add" ? "Nuevo producto" : "Editar producto"}</h2>
     <label>Nombre</label>
-    <input type="text" id="pfName" value="${d.name}" placeholder="Ej: Hamburguesa doble">
+    <input type="text" id="pfName" value="${escapeHtml(d.name)}" placeholder="Ej: Hamburguesa doble">
     <label>Categoría</label>
     <select id="pfCat">${catOptions}</select>
     <label>Subcategoría</label>
@@ -4224,7 +4240,7 @@ function openQuestionEditor(idx){
   showModal(`
     <h2>${idx !== null ? "Editar pregunta" : "Añadir pregunta"}</h2>
     <label>Pregunta</label>
-    <input type="text" id="qeText" value="${q.text}" placeholder="Ej: Elige tu esencia">
+    <input type="text" id="qeText" value="${escapeHtml(q.text)}" placeholder="Ej: Elige tu esencia">
     <label>Opción 1</label><input type="text" id="qeOpt0" value="${opts[0]||''}">
     <label>Opción 2</label><input type="text" id="qeOpt1" value="${opts[1]||''}">
     <label>Opción 3</label><input type="text" id="qeOpt2" value="${opts[2]||''}">
@@ -4486,9 +4502,12 @@ function deleteSubcategory(subId){
   const prodCount = state.products.filter(p => p.subcategoryId === subId).length;
   const msg = prodCount > 0
     ? `Esta subcategoría tiene ${prodCount} producto(s) asociado(s). Si la eliminas, esos productos también se eliminarán. ¿Seguro que quieres continuar?`
-    : `¿Seguro que quieres eliminar la subcategoría "${sc.name}"?`;
+    : `¿Seguro que quieres eliminar la subcategoría "${escapeHtml(sc.name)}"?`;
   openConfirmModal("Eliminar subcategoría", msg, () => {
+    const goneIds = state.products.filter(p => p.subcategoryId === subId).map(p => p.id);
     state.products = state.products.filter(p => p.subcategoryId !== subId);
+    goneIds.forEach(id => { removeProductFromStockGroups(id); removeProductFromCombos(id); });
+    cleanupComboCategory();
     state.subcategories = state.subcategories.filter(x => x.id !== subId);
     saveState();
     renderSubcategoryAdminList();
@@ -4607,11 +4626,14 @@ function deleteCategory(catId){
   const prodCount = state.products.filter(p => p.categoryId === catId).length;
   const msg = prodCount > 0
     ? `Esta categoría tiene ${prodCount} producto(s) asociado(s). Si la eliminas, esos productos también se eliminarán. ¿Seguro que quieres continuar?`
-    : `¿Seguro que quieres eliminar la categoría "${cat.name}"?`;
+    : `¿Seguro que quieres eliminar la categoría "${escapeHtml(cat.name)}"?`;
   openConfirmModal("Eliminar categoría", msg, () => {
+    const goneIds2 = state.products.filter(p => p.categoryId === catId).map(p => p.id);
     state.products = state.products.filter(p => p.categoryId !== catId);
+    goneIds2.forEach(id => { removeProductFromStockGroups(id); removeProductFromCombos(id); });
     state.subcategories = (state.subcategories || []).filter(sc => sc.categoryId !== catId);
     state.categories = state.categories.filter(c => c.id !== catId);
+    cleanupComboCategory();
     saveState();
     renderCategoryAdminList();
   }, true, {}, true);
@@ -4640,7 +4662,7 @@ function stockRowElement(p){
   row.className = "admin-prod-row";
   row.innerHTML = `
     <div class="admin-prod-info">
-      <span class="admin-prod-name">${p.name} ${g ? '<span class="tag">Agrupado</span>' : ''} ${!p.stockTracked ? '<span class="tag">Sin control</span>' : ''} ${low ? '<span class="tag danger">STOCK BAJO</span>' : ''}</span>
+      <span class="admin-prod-name">${escapeHtml(p.name)} ${g ? '<span class="tag">Agrupado</span>' : ''} ${!p.stockTracked ? '<span class="tag">Sin control</span>' : ''} ${low ? '<span class="tag danger">STOCK BAJO</span>' : ''}</span>
       <span class="admin-prod-meta">${g ? "Stock compartido (" + escapeHtml(g.name) + "): " + p.stock + (f > 1 ? " · cada unidad descuenta " + f : "") : "Stock actual: " + p.stock} · Stock mínimo: ${p.stockMin}</span>
     </div>
     <div class="admin-prod-actions">
@@ -4662,7 +4684,7 @@ function renderStockScreen(){
   state.categories.forEach(cat => {
     const block = document.createElement("div");
     block.className = "admin-cat";
-    block.innerHTML = `<h3>${cat.name}</h3>`;
+    block.innerHTML = `<h3>${escapeHtml(cat.name)}</h3>`;
     const groups = productGroupsOfCategory(cat);
     groups.forEach(gr => {
       if (gr.title){
@@ -4691,7 +4713,7 @@ function renderStockScreen(){
   wrap.querySelectorAll("[data-stock-clear]").forEach(b => b.addEventListener("click", () => {
     const p = state.products.find(p => p.id === b.dataset.stockClear);
     if (!p) return;
-    openConfirmModal("Vaciar stock", `¿Estás seguro de vaciar el stock de "${p.name}"? Su stock actual quedará en 0${stockGroupOf(p.id) ? " (y el de todo su grupo, porque comparten stock)" : ""}.`, () => {
+    openConfirmModal("Vaciar stock", `¿Estás seguro de vaciar el stock de "${escapeHtml(p.name)}"? Su stock actual quedará en 0${stockGroupOf(p.id) ? " (y el de todo su grupo, porque comparten stock)" : ""}.`, () => {
       setStockOf(p, 0);
       saveState();
       renderStockScreen();
@@ -4718,7 +4740,7 @@ function openStockMoveModal(productId, mode){
   if (!p) return;
   const title = mode === "add" ? "Añadir stock" : "Quitar stock";
   showModal(`
-    <h2>${title} — ${p.name}</h2>
+    <h2>${title} — ${escapeHtml(p.name)}</h2>
     <p class="muted" style="margin-bottom:10px;">Stock actual: ${p.stock}</p>
     <label>Cantidad a ${mode === "add" ? "añadir" : "quitar"}</label>
     <input type="number" id="stockMoveQty" min="1" step="1" placeholder="0">
@@ -4811,7 +4833,7 @@ function renderCombosList(){
   wrap.querySelectorAll("[data-combo-del]").forEach(b => b.addEventListener("click", () => {
     const p = state.products.find(x => x.id === b.dataset.comboDel);
     if (!p) return;
-    openConfirmModal("Eliminar combo", `¿Eliminar el combo "${p.name}"? Las ventas ya hechas se conservan.`, () => {
+    openConfirmModal("Eliminar combo", `¿Eliminar el combo "${escapeHtml(p.name)}"? Las ventas ya hechas se conservan.`, () => {
       state.products = state.products.filter(x => x.id !== p.id);
       cleanupComboCategory();
       saveState();
@@ -5054,6 +5076,16 @@ function saveComboDraft(){
 }
 
 // ---------- AGRUPAR STOCK ----------
+// Si se elimina un producto que formaba parte de combos, se quita de ellos;
+// un combo que se queda sin productos se elimina.
+function removeProductFromCombos(pid){
+  state.products.forEach(pr => {
+    if (pr.combo && pr.combo.items.some(c => c.productId === pid)){
+      pr.combo.items = pr.combo.items.filter(c => c.productId !== pid);
+    }
+  });
+  state.products = state.products.filter(pr => !(pr.combo && pr.combo.items.length === 0));
+}
 function removeProductFromStockGroups(pid){
   state.stockGroups = (state.stockGroups || [])
     .map(g => Object.assign({}, g, { members: (g.members || []).filter(m => m.productId !== pid) }))
@@ -5089,7 +5121,7 @@ function renderStockGroups(){
   wrap.querySelectorAll("[data-sg-del]").forEach(b => b.addEventListener("click", () => {
     const g = state.stockGroups.find(x => x.id === b.dataset.sgDel);
     if (!g) return;
-    openConfirmModal("Eliminar agrupación", `¿Eliminar "${g.name}"? Los productos dejan de compartir stock; cada uno conserva el número que tiene ahora.`, () => {
+    openConfirmModal("Eliminar agrupación", `¿Eliminar "${escapeHtml(g.name)}"? Los productos dejan de compartir stock; cada uno conserva el número que tiene ahora.`, () => {
       state.stockGroups = state.stockGroups.filter(x => x.id !== g.id);
       saveState();
       renderStockGroups();
@@ -5191,7 +5223,7 @@ function renderStockLowScreen(){
     row.className = "admin-prod-row";
     row.innerHTML = `
       <div class="admin-prod-info">
-        <span class="admin-prod-name">${p.name} <span class="tag danger">STOCK BAJO</span></span>
+        <span class="admin-prod-name">${escapeHtml(p.name)} <span class="tag danger">STOCK BAJO</span></span>
         <span class="admin-prod-meta">Stock actual: ${p.stock} · Stock mínimo: ${p.stockMin}</span>
       </div>
       <div class="admin-prod-actions">
@@ -5206,7 +5238,7 @@ function renderStockLowScreen(){
     if (!groups.length) return;
     const block = document.createElement("div");
     block.className = "admin-cat";
-    block.innerHTML = `<h3>${cat.name}</h3>`;
+    block.innerHTML = `<h3>${escapeHtml(cat.name)}</h3>`;
     groups.forEach(gr => {
       if (gr.title){
         const h = document.createElement("h4");
@@ -5233,7 +5265,7 @@ function openStockMoveModalFromLow(productId){
   const p = state.products.find(x => x.id === productId);
   if (!p) return;
   showModal(`
-    <h2>Añadir stock — ${p.name}</h2>
+    <h2>Añadir stock — ${escapeHtml(p.name)}</h2>
     <p class="muted" style="margin-bottom:10px;">Stock actual: ${p.stock}</p>
     <label>Cantidad a añadir</label>
     <input type="number" id="stockMoveQty" min="1" step="1" placeholder="0">
@@ -5878,7 +5910,7 @@ document.getElementById("btnResetTheme").addEventListener("click", () => {
 // =========================================================
 
 function pedidoSummaryHtml(sale){
-  return sale.items.map(i => `${i.qty} ${i.name}`).join(", ");
+  return sale.items.map(i => `${i.qty} ${escapeHtml(i.name)}`).join(", ");
 }
 
 function pendingUnitsCount(sale){
@@ -5900,7 +5932,7 @@ function renderPedidos(){
     row.innerHTML = `
       <span class="hnum">#${sale.jornadaNumber}</span>
       <span class="hmeta">
-        ${sale.name ? `<strong>${sale.name}</strong> · ` : ""}${pedidoSummaryHtml(sale)}
+        ${sale.name ? `<strong>${escapeHtml(sale.name)}</strong> · ` : ""}${pedidoSummaryHtml(sale)}
         · <span class="tag">${pendingUnitsCount(sale)} pendiente(s)</span>
       </span>
       <div class="hactions">
@@ -5931,7 +5963,7 @@ function renderPedidosFinalizados(){
     row.className = "history-row";
     row.innerHTML = `
       <span class="hnum">#${sale.jornadaNumber}</span>
-      <span class="hmeta">${sale.name ? `<strong>${sale.name}</strong> · ` : ""}${pedidoSummaryHtml(sale)}</span>
+      <span class="hmeta">${sale.name ? `<strong>${escapeHtml(sale.name)}</strong> · ` : ""}${pedidoSummaryHtml(sale)}</span>
       <div class="hactions">
         <button class="mini-btn" data-review="${sale.id}">Revisar</button>
       </div>
@@ -5961,7 +5993,7 @@ function renderProductosPendientes(){
     row.className = "admin-prod-row";
     row.innerHTML = `
       <div class="admin-prod-info">
-        <span class="admin-prod-name">${name}</span>
+        <span class="admin-prod-name">${escapeHtml(name)}</span>
       </div>
       <div class="admin-prod-actions"><span class="tag">${qty} pendiente${qty===1?"":"s"}</span></div>
     `;
@@ -5995,7 +6027,7 @@ function renderCocina(){
     row.className = "admin-prod-row";
     row.innerHTML = `
       <div class="admin-prod-info">
-        <span class="admin-prod-name">${name}</span>
+        <span class="admin-prod-name">${escapeHtml(name)}</span>
       </div>
       <div class="admin-prod-actions"><span class="tag">${qty} pendiente${qty===1?"":"s"}</span></div>
     `;
@@ -6097,7 +6129,7 @@ function renderVisProductList(catId, subId){
     btn.className = "visibility-row" + (p.hidden ? " is-hidden" : "");
     // El stock solo se muestra si ese producto tiene su control de stock activado.
     btn.innerHTML = `
-      <span class="visibility-name">${p.name} — Bs ${p.price.toFixed(2)}${p.stockTracked ? " · Stock: " + p.stock : ""}</span>
+      <span class="visibility-name">${escapeHtml(p.name)} — Bs ${p.price.toFixed(2)}${p.stockTracked ? " · Stock: " + p.stock : ""}</span>
       ${p.hidden ? '<span class="tag danger">OCULTADO</span>' : '<span class="mini-btn">Ocultar</span>'}
     `;
     btn.addEventListener("click", () => {
@@ -6146,7 +6178,7 @@ function renderDeliveryDetail(){
       : "";
     const btn = document.createElement("button");
     btn.className = "unit-btn" + (unit.delivered ? " delivered" : "");
-    btn.innerHTML = `<div class="unit-name">${unit.name}</div>${answersHtml}`;
+    btn.innerHTML = `<div class="unit-name">${escapeHtml(unit.name)}</div>${answersHtml}`;
     btn.addEventListener("click", () => toggleDeliveryUnit(sale.id, idx));
     (unit.delivered ? doneGrid : pendingGrid).appendChild(btn);
   });
