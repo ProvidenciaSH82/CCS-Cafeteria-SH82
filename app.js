@@ -521,7 +521,9 @@ function getJornadaCounterKey(){
 // responde en unos segundos (sin internet), se usa el cálculo local de
 // siempre, para no trabar una venta.
 function nextJornadaNumberSafe(){
-  const localFallback = () => getCurrentJornadaSales().length + 1;
+  // Sin conexión (o modo respaldo): se toma el número más alto ya usado en la jornada
+  // (contando también las ventas anuladas) + 1, para no repetir números.
+  const localFallback = () => getCurrentJornadaSalesWithVoided().reduce((m, x) => Math.max(m, x.jornadaNumber || 0), 0) + 1;
   const key = getJornadaCounterKey();
   if (!fbReady || !fbRootRef || !key) return Promise.resolve(localFallback());
   return new Promise((resolve) => {
@@ -3686,7 +3688,7 @@ function cancelDebtPurchase(saleId){
       `Se anulará lo que falta pagar de esta compra (Bs ${entry.remaining.toFixed(2)}). No se devuelve stock ni se mueve la caja. ¿Continuar?`,
       () => {
         const fresh = state.sales.find(x => x.id === saleId);
-        if (!fresh) return;
+        if (!fresh || fresh.debtCancel) return;   // evita aplicarlo dos veces (doble toque)
         const e2 = computeDebtorLedger(fresh.debt.debtorId).purchases.find(p => p.sale.id === saleId);
         fresh.debtCancel = { date: new Date().toISOString(), forgiven: e2 ? e2.remaining : entry.remaining, deviceId: getDeviceId() };
         saveState();
@@ -3841,6 +3843,7 @@ function deleteSale(saleId){
   }
   openConfirmModal("Anular venta", `¿Seguro que quieres anular la venta #${String(sale.jornadaNumber).padStart(3,'0')}? Se devolverá el stock, se descontará de la caja y quedará en el historial marcada como anulada. Esta acción no se puede deshacer.`, () => {
     requireDeletePassword(() => {
+      if (sale.deleted) return;   // evita devolver el stock dos veces (doble toque)
       if (state.stockEnabled){
         applyStockDemand(demandOfItems(sale.items), +1);
       }
