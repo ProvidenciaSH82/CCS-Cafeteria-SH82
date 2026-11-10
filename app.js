@@ -2115,7 +2115,7 @@ function exportClosurePdf(closure){
     }
 
     const fileName = "cierre_caja_" + dClose.toISOString().slice(0,10) + "_" + closure.id + ".pdf";
-    doc.save(fileName);
+    saveFileBlob(fileName, doc.output("blob"));
   } catch (err){
     console.error("Error generando el PDF del cierre:", err);
     alert("Ocurrió un error al generar el PDF del cierre: " + (err && err.message ? err.message : err) + ". Vuelve a intentarlo; si el problema continúa, avísame con este mensaje.");
@@ -5345,7 +5345,8 @@ function exportProductsXlsx(){
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Productos");
   const fileName = "productos_" + state.businessName.replace(/\s+/g, "_").toLowerCase() + ".xlsx";
-  XLSX.writeFile(wb, fileName);
+  const xlsxBytes = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  saveFileBlob(fileName, new Blob([xlsxBytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
   closeModal();
 }
 
@@ -5674,6 +5675,50 @@ function forceFullResync(){
   alert("Resincronización enviada. En unos segundos, los demás dispositivos deberían ponerse al día automáticamente.");
 }
 
+// ---------- GUARDAR ARCHIVOS (web y app Android) ----------
+// En el navegador descarga normal. En la app Android (Capacitor) el WebView no
+// descarga blobs, así que se escribe el archivo y se abre "Compartir/Guardar".
+function isNativeApp(){
+  try { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); }
+  catch (e){ return false; }
+}
+function blobToBase64(blob){
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] || "");
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+async function saveFileBlob(fileName, blob){
+  if (isNativeApp() && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem){
+    try {
+      const FS = window.Capacitor.Plugins.Filesystem;
+      const data = await blobToBase64(blob);
+      const res = await FS.writeFile({ path: fileName, data, directory: "CACHE" });
+      const Share = window.Capacitor.Plugins.Share;
+      if (Share){
+        await Share.share({ title: fileName, dialogTitle: "Guardar o enviar " + fileName, url: res.uri });
+      } else {
+        showToast("Archivo guardado: " + fileName);
+      }
+      return true;
+    } catch (e){
+      const msg = String(e && e.message || e);
+      if (/cancel/i.test(msg)) return false;
+      alert("No se pudo guardar el archivo: " + msg);
+      return false;
+    }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  return true;
+}
+
 // ---------- RESPALDO DE DATOS (archivo) ----------
 // Descargar: guarda todo lo que este dispositivo tiene en un archivo .json.
 // Cargar (solo en la versión de respaldo sin nube): reemplaza los datos de ESTE
@@ -5682,14 +5727,9 @@ function forceFullResync(){
 function downloadBackupFile(){
   const payload = { posShalomBackup: 1, exportedAt: new Date().toISOString(), state: deepClone(state) };
   const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-  const a = document.createElement("a");
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
-  a.href = URL.createObjectURL(blob);
-  a.download = `respaldo-pos-shalom-${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}.json`;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  saveFileBlob(`respaldo-pos-shalom-${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}.json`, blob);
   showToast("Respaldo descargado");
 }
 function loadBackupFile(file){
